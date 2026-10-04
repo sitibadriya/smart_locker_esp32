@@ -1,0 +1,151 @@
+#include <Arduino.h>
+#include <Adafruit_Fingerprint.h>
+
+#define RXD2 16
+#define TXD2 17
+
+HardwareSerial mySerial(2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+uint8_t id = 1;
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    Serial.println();
+    Serial.println("=== ENROLL FINGERPRINT ===");
+
+    mySerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
+    finger.begin(57600);
+
+    if (finger.verifyPassword())
+    {
+        Serial.println("Sensor Fingerprint terdeteksi!");
+    }
+    else
+    {
+        Serial.println("Sensor Fingerprint tidak terdeteksi!");
+        while (1)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println();
+    Serial.println("Pendaftaran akan menggunakan ID 1.");
+    Serial.println("Silakan tempelkan jari yang ingin didaftarkan.");
+}
+
+void loop()
+{
+    int p = -1;
+
+    // Menunggu jari ditempelkan
+    while (p != FINGERPRINT_OK)
+    {
+        p = finger.getImage();
+
+        if (p == FINGERPRINT_NOFINGER)
+        {
+            delay(100);
+        }
+        else if (p != FINGERPRINT_OK)
+        {
+            Serial.println("Gagal membaca sidik jari.");
+            delay(500);
+        }
+    }
+
+    Serial.println("Sidik jari terdeteksi!");
+
+    // Mengubah gambar menjadi template
+    p = finger.image2Tz(1);
+
+    if (p != FINGERPRINT_OK)
+    {
+        Serial.println("Gagal memproses sidik jari.");
+        return;
+    }
+
+    Serial.println("Sidik jari berhasil diproses.");
+    Serial.println("Silakan angkat jari.");
+
+    delay(2000);
+
+    // Tunggu sampai jari benar-benar diangkat
+    while (finger.getImage() != FINGERPRINT_NOFINGER)
+    {
+        delay(100);
+    }
+
+    Serial.println("Sekarang tempelkan JARI YANG SAMA lagi.");
+
+    // Tunggu jari kedua
+    p = -1;
+
+    while (p != FINGERPRINT_OK)
+    {
+        p = finger.getImage();
+
+        if (p == FINGERPRINT_NOFINGER)
+        {
+            delay(100);
+        }
+        else if (p != FINGERPRINT_OK)
+        {
+            Serial.println("Gagal membaca sidik jari.");
+            delay(500);
+        }
+    }
+
+    Serial.println("Sidik jari kedua terdeteksi!");
+
+    p = finger.image2Tz(2);
+
+    if (p != FINGERPRINT_OK)
+    {
+        Serial.println("Gagal memproses sidik jari kedua.");
+        return;
+    }
+
+    // Membandingkan dua hasil scan
+    p = finger.createModel();
+
+    if (p == FINGERPRINT_OK)
+    {
+        Serial.println("Kedua sidik jari cocok!");
+
+        // Menyimpan template ke ID 1
+        p = finger.storeModel(id);
+
+        if (p == FINGERPRINT_OK)
+        {
+            Serial.println();
+            Serial.println("==============================");
+            Serial.println("SIDIK JARI BERHASIL DIDAFTARKAN!");
+            Serial.println("Fingerprint ID = 1");
+            Serial.println("==============================");
+            Serial.println();
+            Serial.println("Enrollment selesai.");
+            Serial.println("Silakan reset ESP32 untuk tes.");
+
+            while (1)
+            {
+                delay(1000);
+            }
+        }
+        else
+        {
+            Serial.println("Gagal menyimpan sidik jari.");
+        }
+    }
+    else
+    {
+        Serial.println("Kedua sidik jari TIDAK cocok.");
+        Serial.println("Silakan ulangi enrollment.");
+    }
+
+    delay(2000);
+}

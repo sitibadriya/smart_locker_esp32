@@ -1,0 +1,189 @@
+#include <Arduino.h>
+#include <Adafruit_Fingerprint.h>
+
+// ===============================
+// PIN UART ESP32 ↔ Fingerprint
+// ===============================
+#define RXD2 16
+#define TXD2 17
+
+HardwareSerial mySerial(2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+
+// ===============================
+// IDENTITAS SMART LOCKER
+// ===============================
+const char *DEVICE_ID = "esp32-locker-01";
+const char *LOCKER_ID = "L01";
+
+// ===============================
+// MAPPING FINGERPRINT
+// ===============================
+// Sensor ID 1 = FP01
+const int SENSOR_ID_FP01 = 1;
+
+const char *FINGERPRINT_ID_FP01 = "FP01";
+const char *SANTRI_ID_FP01 = "ST-2026-001";
+const char *NAMA_FP01 = "Ahmad Fauzi";
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println("   SMART LOCKER - TEST MAPPING FP");
+    Serial.println("======================================");
+
+    // UART ke sensor fingerprint
+    mySerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
+    finger.begin(57600);
+
+    // Cek koneksi sensor
+    if (finger.verifyPassword())
+    {
+        Serial.println("Sensor Fingerprint terdeteksi!");
+    }
+    else
+    {
+        Serial.println("ERROR: Sensor Fingerprint tidak terdeteksi!");
+        while (true)
+        {
+            delay(1000);
+        }
+    }
+
+    Serial.println();
+    Serial.println("MAPPING:");
+    Serial.print("Sensor ID      : ");
+    Serial.println(SENSOR_ID_FP01);
+
+    Serial.print("Fingerprint ID : ");
+    Serial.println(FINGERPRINT_ID_FP01);
+
+    Serial.print("Santri ID      : ");
+    Serial.println(SANTRI_ID_FP01);
+
+    Serial.print("Nama           : ");
+    Serial.println(NAMA_FP01);
+
+    Serial.print("Locker ID      : ");
+    Serial.println(LOCKER_ID);
+
+    Serial.println();
+    Serial.println("Silakan tempelkan jari yang terdaftar sebagai FP01...");
+    Serial.println();
+}
+
+void loop()
+{
+
+    // Mencari fingerprint
+    uint8_t result = finger.getImage();
+
+    if (result == FINGERPRINT_NOFINGER)
+    {
+        return;
+    }
+
+    if (result != FINGERPRINT_OK)
+    {
+        Serial.println("Gagal membaca gambar fingerprint.");
+        delay(300);
+        return;
+    }
+
+    Serial.println("Sidik jari terdeteksi!");
+
+    // Konversi gambar menjadi template
+    result = finger.image2Tz();
+
+    if (result != FINGERPRINT_OK)
+    {
+        Serial.println("Gagal memproses sidik jari.");
+        delay(500);
+        return;
+    }
+
+    Serial.println("Mencari fingerprint...");
+
+    // Cari kecocokan di sensor
+    result = finger.fingerSearch();
+
+    if (result == FINGERPRINT_OK)
+    {
+
+        int sensorID = finger.fingerID;
+        int confidence = finger.confidence;
+
+        Serial.println();
+        Serial.println(">>> SIDIK JARI DITEMUKAN <<<");
+
+        Serial.print("Sensor ID      : ");
+        Serial.println(sensorID);
+
+        Serial.print("Confidence     : ");
+        Serial.println(confidence);
+
+        // =========================================
+        // MAPPING SENSOR ID → FP01
+        // =========================================
+
+        if (sensorID == SENSOR_ID_FP01)
+        {
+
+            Serial.println();
+            Serial.println("Fingerprint ID : FP01");
+            Serial.print("Santri         : ");
+            Serial.println(NAMA_FP01);
+
+            Serial.print("Santri ID      : ");
+            Serial.println(SANTRI_ID_FP01);
+
+            Serial.print("Locker         : ");
+            Serial.println(LOCKER_ID);
+
+            Serial.println();
+            Serial.println("STATUS: PEMILIK LOKER");
+            Serial.println("AKSES: GRANTED");
+        }
+
+        else
+        {
+
+            Serial.println();
+            Serial.println("Fingerprint ditemukan.");
+            Serial.println("Tetapi fingerprint ini bukan FP01.");
+            Serial.println("STATUS: BUKAN PEMILIK");
+            Serial.println("AKSES: DENIED");
+        }
+
+        Serial.println();
+        Serial.println("--------------------------------------");
+        Serial.println("Silakan angkat jari.");
+        Serial.println("--------------------------------------");
+        Serial.println();
+
+        delay(1500);
+    }
+
+    else if (result == FINGERPRINT_NOTFOUND)
+    {
+
+        Serial.println();
+        Serial.println(">>> SIDIK JARI TIDAK DITEMUKAN <<<");
+        Serial.println("Fingerprint belum terdaftar.");
+        Serial.println("AKSES: DENIED");
+        Serial.println();
+
+        delay(1000);
+    }
+
+    else
+    {
+
+        Serial.println("Gagal melakukan pencarian fingerprint.");
+        delay(500);
+    }
+}

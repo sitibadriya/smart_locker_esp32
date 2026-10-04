@@ -1,0 +1,388 @@
+#define ENABLE_USER_AUTH
+#define ENABLE_FIRESTORE
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>
+#include <time.h>
+
+// ===============================
+// WIFI
+// ===============================
+#define WIFI_SSID "vivo Y16"
+#define WIFI_PASSWORD "sibad0202"
+
+// ===============================
+// FIREBASE
+// ===============================
+#define API_KEY "AIzaSyDLZr4hM-aYSckpFVSYZilsJAhgQqsK0yE"
+
+#define USER_EMAIL "smartlocker.esp32@gmail.com"
+#define USER_PASSWORD "fingerprint"
+
+#define FIREBASE_PROJECT_ID "smart-locker-iot-10a0e"
+
+// ======================================
+// IDENTITAS PERANGKAT
+// ======================================
+
+#define ID_PERANGKAT "esp32-locker-01"
+#define ID_LOCKER "L01"
+
+// ======================================
+// FIREBASE OBJECT
+// ======================================
+
+UserAuth user_auth(
+    API_KEY,
+    USER_EMAIL,
+    USER_PASSWORD,
+    3000);
+
+FirebaseApp app;
+
+WiFiClientSecure ssl_client;
+
+using AsyncClient = AsyncClientClass;
+
+AsyncClient aClient(ssl_client);
+
+Firestore::Documents Docs;
+
+// ======================================
+// STATUS
+// ======================================
+
+bool dataSent = false;
+
+// ======================================
+// NTP / WAKTU
+// ======================================
+
+const char *NTP_SERVER = "pool.ntp.org";
+
+const long GMT_OFFSET_SEC = 7 * 3600;
+const int DAYLIGHT_OFFSET_SEC = 0;
+
+// ======================================
+// CALLBACK AUTH
+// ======================================
+
+void authCallback(AsyncResult &aResult)
+{
+    if (aResult.isEvent())
+    {
+        Serial.printf(
+            "Event task: %s, msg: %s, code: %d\n",
+            aResult.uid().c_str(),
+            aResult.appEvent().message().c_str(),
+            aResult.appEvent().code());
+    }
+
+    if (aResult.isDebug())
+    {
+        Serial.printf(
+            "Debug task: %s, msg: %s\n",
+            aResult.uid().c_str(),
+            aResult.debug().c_str());
+    }
+
+    if (aResult.isError())
+    {
+        Serial.printf(
+            "Error task: %s, msg: %s, code: %d\n",
+            aResult.uid().c_str(),
+            aResult.error().message().c_str(),
+            aResult.error().code());
+    }
+}
+
+// ======================================
+// MENDAPATKAN WAKTU UTC
+// ======================================
+
+String dapatkanWaktuUTC()
+{
+    time_t sekarang = time(nullptr);
+
+    struct tm waktu;
+
+    gmtime_r(&sekarang, &waktu);
+
+    char buffer[30];
+
+    strftime(
+        buffer,
+        sizeof(buffer),
+        "%Y-%m-%dT%H:%M:%SZ",
+        &waktu);
+
+    return String(buffer);
+}
+
+// ======================================
+// SETUP
+// ======================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    delay(1000);
+
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println(" SMART LOCKER - TES AKTIVITAS LOCKER");
+    Serial.println("======================================");
+
+    // ==================================
+    // WIFI
+    // ==================================
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    Serial.print("Menghubungkan ke Wi-Fi");
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.print(".");
+        delay(300);
+    }
+
+    Serial.println();
+    Serial.println("Wi-Fi TERHUBUNG!");
+
+    Serial.print("IP ESP32: ");
+    Serial.println(WiFi.localIP());
+
+    // ==================================
+    // SINKRONISASI WAKTU
+    // ==================================
+
+    Serial.println();
+    Serial.println("Menyinkronkan waktu...");
+
+    configTime(
+        GMT_OFFSET_SEC,
+        DAYLIGHT_OFFSET_SEC,
+        NTP_SERVER);
+
+    time_t sekarang = time(nullptr);
+
+    while (sekarang < 100000)
+    {
+        delay(500);
+        sekarang = time(nullptr);
+    }
+
+    Serial.println("Waktu berhasil disinkronkan.");
+
+    // ==================================
+    // SSL
+    // ==================================
+
+    ssl_client.setInsecure();
+
+    // ==================================
+    // FIREBASE AUTH
+    // ==================================
+
+    Serial.println();
+    Serial.println("Menginisialisasi Firebase...");
+
+    initializeApp(
+        aClient,
+        app,
+        getAuth(user_auth),
+        authCallback,
+        "authTask");
+
+    Serial.println("Firebase initialization dimulai...");
+
+    // ==================================
+    // FIRESTORE
+    // ==================================
+
+    app.getApp<Firestore::Documents>(Docs);
+
+    Serial.println("Firestore siap digunakan.");
+}
+
+// ======================================
+// LOOP
+// ======================================
+
+void loop()
+{
+    // Menjalankan Firebase
+    app.loop();
+
+    // Menjalankan Firestore
+    Docs.loop();
+
+    // ==================================
+    // TUNGGU AUTH BERHASIL
+    // ==================================
+
+    if (app.ready() && !dataSent)
+    {
+        dataSent = true;
+
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" AUTENTIKASI FIREBASE BERHASIL");
+        Serial.println("======================================");
+
+        Serial.print("UID Pengguna: ");
+        Serial.println(app.getUid());
+
+        // ==================================
+        // DATA AKTIVITAS
+        // ==================================
+
+        Values::TimestampValue waktuAkses(
+            dapatkanWaktuUTC());
+
+        Values::StringValue idLocker(
+            ID_LOCKER);
+
+        Values::StringValue idPerangkat(
+            ID_PERANGKAT);
+
+        Values::StringValue idSidikJari(
+            "FP01");
+
+        Values::StringValue idSantri(
+            "ST-2026-001");
+
+        Values::StringValue namaSantri(
+            "Ahmad Fauzi");
+
+        Values::StringValue status(
+            "diterima");
+
+        Values::StringValue metodeAkses(
+            "sidik_jari");
+
+        Values::StringValue dataSidikJari(
+            "jari pemilik");
+
+        Values::IntegerValue tingkatKecocokan(
+            74);
+
+        Values::IntegerValue idSensor(
+            1);
+
+        // ==================================
+        // MEMBUAT DOKUMEN
+        // ==================================
+
+        Document<Values::Value> dokumen(
+            "waktuAkses",
+            Values::Value(waktuAkses));
+
+        dokumen.add(
+            "idLocker",
+            Values::Value(idLocker));
+
+        dokumen.add(
+            "idPerangkat",
+            Values::Value(idPerangkat));
+
+        dokumen.add(
+            "idSidikJari",
+            Values::Value(idSidikJari));
+
+        dokumen.add(
+            "idSantri",
+            Values::Value(idSantri));
+
+        dokumen.add(
+            "namaSantri",
+            Values::Value(namaSantri));
+
+        dokumen.add(
+            "status",
+            Values::Value(status));
+
+        dokumen.add(
+            "metodeAkses",
+            Values::Value(metodeAkses));
+
+        dokumen.add(
+            "dataSidikJari",
+            Values::Value(dataSidikJari));
+
+        dokumen.add(
+            "tingkatKecocokan",
+            Values::Value(tingkatKecocokan));
+
+        dokumen.add(
+            "idSensor",
+            Values::Value(idSensor));
+
+        // ==================================
+        // COLLECTION
+        // ==================================
+
+        String jalurDokumen =
+            "aktivitas-locker";
+
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" MENGIRIM AKTIVITAS KE FIRESTORE");
+        Serial.println("======================================");
+
+        Serial.println("Locker       : L01");
+        Serial.println("Sidik Jari   : FP01");
+        Serial.println("Santri       : Ahmad Fauzi");
+        Serial.println("Status       : diterima");
+        Serial.println("Kecocokan    : 74");
+        Serial.println("ID Sensor    : 1");
+        Serial.println(
+            "Waktu        : " + dapatkanWaktuUTC());
+
+        // ==================================
+        // KIRIM KE FIRESTORE
+        // ==================================
+
+        String hasil = Docs.createDocument(
+            aClient,
+            Firestore::Parent(FIREBASE_PROJECT_ID),
+            jalurDokumen,
+            DocumentMask(),
+            dokumen);
+
+        // ==================================
+        // HASIL
+        // ==================================
+
+        if (aClient.lastError().code() == 0)
+        {
+            Serial.println();
+            Serial.println("======================================");
+            Serial.println(" AKTIVITAS BERHASIL DISIMPAN!");
+            Serial.println("======================================");
+
+            Serial.println(hasil);
+        }
+        else
+        {
+            Serial.println();
+            Serial.println("======================================");
+            Serial.println(" GAGAL MENYIMPAN AKTIVITAS");
+            Serial.println("======================================");
+
+            Serial.print("Kode error: ");
+            Serial.println(
+                aClient.lastError().code());
+
+            Serial.print("Pesan error: ");
+            Serial.println(
+                aClient.lastError().message());
+        }
+    }
+
+    delay(10);
+}

@@ -1,0 +1,663 @@
+#define ENABLE_USER_AUTH
+#define ENABLE_FIRESTORE
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <FirebaseClient.h>
+#include <Adafruit_Fingerprint.h>
+#include <time.h>
+
+// ===============================
+// WIFI
+// ===============================
+#define WIFI_SSID "vivo Y16"
+#define WIFI_PASSWORD "sibad0202"
+
+// ===============================
+// FIREBASE
+// ===============================
+#define API_KEY "AIzaSyDLZr4hM-aYSckpFVSYZilsJAhgQqsK0yE"
+
+#define USER_EMAIL "smartlocker.esp32@gmail.com"
+#define USER_PASSWORD "fingerprint"
+
+#define FIREBASE_PROJECT_ID "smart-locker-iot-10a0e"
+
+// ======================================
+// IDENTITAS PERANGKAT
+// ======================================
+
+#define ID_PERANGKAT "esp32-locker-01"
+#define ID_LOCKER "L01"
+
+// ======================================
+// FINGERPRINT
+// ======================================
+
+#define RXD2 16
+#define TXD2 17
+
+HardwareSerial mySerial(2);
+
+Adafruit_Fingerprint finger(&mySerial);
+
+// ======================================
+// FIREBASE OBJECT
+// ======================================
+
+UserAuth user_auth(
+    API_KEY,
+    USER_EMAIL,
+    USER_PASSWORD,
+    3000);
+
+FirebaseApp app;
+
+WiFiClientSecure ssl_client;
+
+using AsyncClient = AsyncClientClass;
+
+AsyncClient aClient(ssl_client);
+
+Firestore::Documents Docs;
+
+// ======================================
+// STATUS
+// ======================================
+
+bool firebaseReady = false;
+
+// ======================================
+// NTP / WAKTU
+// ======================================
+
+const char *NTP_SERVER = "pool.ntp.org";
+
+const long GMT_OFFSET_SEC = 7 * 3600;
+
+const int DAYLIGHT_OFFSET_SEC = 0;
+
+// ======================================
+// CALLBACK AUTH
+// ======================================
+
+void authCallback(AsyncResult &aResult)
+{
+    if (aResult.isEvent())
+    {
+        Serial.printf(
+            "Event task: %s, msg: %s, code: %d\n",
+            aResult.uid().c_str(),
+            aResult.appEvent().message().c_str(),
+            aResult.appEvent().code());
+    }
+
+    if (aResult.isDebug())
+    {
+        Serial.printf(
+            "Debug task: %s, msg: %s\n",
+            aResult.uid().c_str(),
+            aResult.debug().c_str());
+    }
+
+    if (aResult.isError())
+    {
+        Serial.printf(
+            "Error task: %s, msg: %s, code: %d\n",
+            aResult.uid().c_str(),
+            aResult.error().message().c_str(),
+            aResult.error().code());
+    }
+}
+
+// ======================================
+// MENDAPATKAN WAKTU UTC
+// ======================================
+
+String dapatkanWaktuUTC()
+{
+    time_t sekarang = time(nullptr);
+
+    struct tm waktu;
+
+    gmtime_r(&sekarang, &waktu);
+
+    char buffer[30];
+
+    strftime(
+        buffer,
+        sizeof(buffer),
+        "%Y-%m-%dT%H:%M:%SZ",
+        &waktu);
+
+    return String(buffer);
+}
+
+// ======================================
+// INISIALISASI FINGERPRINT
+// ======================================
+
+bool inisialisasiFingerprint()
+{
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println(" MEMERIKSA SENSOR FINGERPRINT");
+    Serial.println("======================================");
+
+    mySerial.begin(
+        57600,
+        SERIAL_8N1,
+        RXD2,
+        TXD2);
+
+    finger.begin(57600);
+
+    delay(500);
+
+    if (finger.verifyPassword())
+    {
+        Serial.println("Sensor fingerprint TERDETEKSI!");
+
+        Serial.print("Kapasitas sensor: ");
+        Serial.println(finger.capacity);
+
+        return true;
+    }
+
+    Serial.println("Sensor fingerprint TIDAK TERDETEKSI!");
+
+    Serial.println(
+        "Periksa kembali wiring TX/RX dan GND.");
+
+    return false;
+}
+
+// ======================================
+// MENCARI FINGERPRINT
+// ======================================
+
+int cariFingerprint()
+{
+    uint8_t p = finger.getImage();
+
+    if (p != FINGERPRINT_OK)
+    {
+        return -1;
+    }
+
+    p = finger.image2Tz();
+
+    if (p != FINGERPRINT_OK)
+    {
+        return -1;
+    }
+
+    p = finger.fingerSearch();
+
+    if (p == FINGERPRINT_OK)
+    {
+        Serial.println();
+        Serial.println("Sidik jari DITEMUKAN!");
+
+        Serial.print("ID Sensor   : ");
+        Serial.println(finger.fingerID);
+
+        Serial.print("Kecocokan   : ");
+        Serial.println(finger.confidence);
+
+        return finger.fingerID;
+    }
+
+    if (p == FINGERPRINT_NOTFOUND)
+    {
+        Serial.println();
+        Serial.println("Sidik jari TIDAK TERDAFTAR.");
+
+        return 0;
+    }
+
+    return -1;
+}
+
+// ======================================
+// KIRIM AKTIVITAS KE FIRESTORE
+// ======================================
+
+void kirimAktivitas(
+    int idSensor,
+    int tingkatKecocokan,
+    String idSidikJari,
+    String idSantri,
+    String namaSantri,
+    String status,
+    String dataSidikJari)
+{
+    // ==================================
+    // WAKTU
+    // ==================================
+
+    Values::TimestampValue waktuAkses(
+        dapatkanWaktuUTC());
+
+    // ==================================
+    // DATA
+    // ==================================
+
+    Values::StringValue idLocker(
+        ID_LOCKER);
+
+    Values::StringValue idPerangkat(
+        ID_PERANGKAT);
+
+    Values::StringValue nilaiIdSidikJari(
+        idSidikJari);
+
+    Values::StringValue nilaiIdSantri(
+        idSantri);
+
+    Values::StringValue nilaiNamaSantri(
+        namaSantri);
+
+    Values::StringValue nilaiStatus(
+        status);
+
+    Values::StringValue metodeAkses(
+        "sidik_jari");
+
+    Values::StringValue nilaiDataSidikJari(
+        dataSidikJari);
+
+    Values::IntegerValue nilaiTingkatKecocokan(
+        tingkatKecocokan);
+
+    Values::IntegerValue nilaiIdSensor(
+        idSensor);
+
+    // ==================================
+    // DOKUMEN
+    // ==================================
+
+    Document<Values::Value> dokumen(
+        "waktuAkses",
+        Values::Value(waktuAkses));
+
+    dokumen.add(
+        "idLocker",
+        Values::Value(idLocker));
+
+    dokumen.add(
+        "idPerangkat",
+        Values::Value(idPerangkat));
+
+    dokumen.add(
+        "idSidikJari",
+        Values::Value(nilaiIdSidikJari));
+
+    dokumen.add(
+        "idSantri",
+        Values::Value(nilaiIdSantri));
+
+    dokumen.add(
+        "namaSantri",
+        Values::Value(nilaiNamaSantri));
+
+    dokumen.add(
+        "status",
+        Values::Value(nilaiStatus));
+
+    dokumen.add(
+        "metodeAkses",
+        Values::Value(metodeAkses));
+
+    dokumen.add(
+        "dataSidikJari",
+        Values::Value(nilaiDataSidikJari));
+
+    dokumen.add(
+        "tingkatKecocokan",
+        Values::Value(nilaiTingkatKecocokan));
+
+    dokumen.add(
+        "idSensor",
+        Values::Value(nilaiIdSensor));
+
+    // ==================================
+    // KIRIM
+    // ==================================
+
+    String jalurDokumen =
+        "aktivitas-locker";
+
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println(" MENGIRIM AKTIVITAS KE FIRESTORE");
+    Serial.println("======================================");
+
+    Serial.print("Locker       : ");
+    Serial.println(ID_LOCKER);
+
+    Serial.print("ID Sensor    : ");
+    Serial.println(idSensor);
+
+    Serial.print("Sidik Jari   : ");
+    Serial.println(idSidikJari);
+
+    Serial.print("Santri       : ");
+    Serial.println(namaSantri);
+
+    Serial.print("Status       : ");
+    Serial.println(status);
+
+    Serial.print("Kecocokan    : ");
+    Serial.println(tingkatKecocokan);
+
+    Serial.print("Waktu        : ");
+    Serial.println(dapatkanWaktuUTC());
+
+    String hasil = Docs.createDocument(
+        aClient,
+        Firestore::Parent(FIREBASE_PROJECT_ID),
+        jalurDokumen,
+        DocumentMask(),
+        dokumen);
+
+    // ==================================
+    // HASIL
+    // ==================================
+
+    if (aClient.lastError().code() == 0)
+    {
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" AKTIVITAS BERHASIL DISIMPAN!");
+        Serial.println("======================================");
+
+        Serial.println(hasil);
+    }
+    else
+    {
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" GAGAL MENYIMPAN AKTIVITAS");
+        Serial.println("======================================");
+
+        Serial.print("Kode error: ");
+
+        Serial.println(
+            aClient.lastError().code());
+
+        Serial.print("Pesan error: ");
+
+        Serial.println(
+            aClient.lastError().message());
+    }
+}
+
+// ======================================
+// SETUP
+// ======================================
+
+void setup()
+{
+    Serial.begin(115200);
+
+    delay(1000);
+
+    Serial.println();
+    Serial.println("======================================");
+    Serial.println(" SMART LOCKER");
+    Serial.println(" FINGERPRINT + FIRESTORE");
+    Serial.println("======================================");
+
+    // ==================================
+    // FINGERPRINT
+    // ==================================
+
+    if (!inisialisasiFingerprint())
+    {
+        Serial.println();
+        Serial.println(
+            "Program tetap berjalan,");
+
+        Serial.println(
+            "tetapi fingerprint belum dapat digunakan.");
+    }
+
+    // ==================================
+    // WIFI
+    // ==================================
+
+    Serial.println();
+    Serial.println("Menghubungkan ke Wi-Fi...");
+
+    WiFi.begin(
+        WIFI_SSID,
+        WIFI_PASSWORD);
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.print(".");
+        delay(300);
+    }
+
+    Serial.println();
+    Serial.println("Wi-Fi TERHUBUNG!");
+
+    Serial.print("IP ESP32: ");
+    Serial.println(WiFi.localIP());
+
+    // ==================================
+    // SINKRONISASI WAKTU
+    // ==================================
+
+    Serial.println();
+    Serial.println("Menyinkronkan waktu...");
+
+    configTime(
+        GMT_OFFSET_SEC,
+        DAYLIGHT_OFFSET_SEC,
+        NTP_SERVER);
+
+    time_t sekarang = time(nullptr);
+
+    while (sekarang < 100000)
+    {
+        delay(500);
+
+        sekarang = time(nullptr);
+    }
+
+    Serial.println(
+        "Waktu berhasil disinkronkan.");
+
+    // ==================================
+    // SSL
+    // ==================================
+
+    ssl_client.setInsecure();
+
+    // ==================================
+    // FIREBASE
+    // ==================================
+
+    Serial.println();
+    Serial.println(
+        "Menginisialisasi Firebase...");
+
+    initializeApp(
+        aClient,
+        app,
+        getAuth(user_auth),
+        authCallback,
+        "authTask");
+
+    Serial.println(
+        "Firebase initialization dimulai...");
+
+    // ==================================
+    // FIRESTORE
+    // ==================================
+
+    app.getApp<Firestore::Documents>(Docs);
+
+    Serial.println(
+        "Firestore siap digunakan.");
+}
+
+// ======================================
+// LOOP
+// ======================================
+
+void loop()
+{
+    app.loop();
+
+    Docs.loop();
+
+    // ==================================
+    // TUNGGU FIREBASE SIAP
+    // ==================================
+
+    if (!app.ready())
+    {
+        delay(10);
+
+        return;
+    }
+
+    if (!firebaseReady)
+    {
+        firebaseReady = true;
+
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" AUTENTIKASI FIREBASE BERHASIL");
+        Serial.println("======================================");
+
+        Serial.print("UID Pengguna: ");
+
+        Serial.println(
+            app.getUid());
+
+        Serial.println();
+        Serial.println("======================================");
+        Serial.println(" SISTEM SIAP");
+        Serial.println("======================================");
+
+        Serial.println(
+            "Silakan tempelkan jari...");
+    }
+
+    // ==================================
+    // CEK FINGERPRINT
+    // ==================================
+
+    int idSensor = cariFingerprint();
+
+    // ==================================
+    // TIDAK ADA JARI
+    // ==================================
+
+    if (idSensor == -1)
+    {
+        delay(100);
+
+        return;
+    }
+
+    // ==================================
+    // FINGERPRINT TIDAK TERDAFTAR
+    // ==================================
+
+    if (idSensor == 0)
+    {
+        Serial.println();
+        Serial.println(
+            "AKSES DITOLAK!");
+
+        kirimAktivitas(
+            0,
+            0,
+            "tidak_dikenal",
+            "",
+            "",
+            "ditolak",
+            "jari tidak terdaftar");
+
+        delay(2000);
+
+        return;
+    }
+
+    // ======================================
+    // FINGERPRINT ID 1-5
+    // PEMILIK LOCKER = SITI BADRIYA
+    // ======================================
+
+    if (idSensor >= 1 && idSensor <= 5)
+    {
+        Serial.println();
+        Serial.println(
+            "PEMILIK LOCKER DITEMUKAN!");
+
+        Serial.print("FP0");
+        Serial.print(idSensor);
+        Serial.println(" → ST-2026-001");
+
+        Serial.println(
+            "Siti Badriya → L01");
+
+        kirimAktivitas(
+            idSensor,
+            finger.confidence,
+            "FP0" + String(idSensor),
+            "ST-2026-001",
+            "Siti Badriya",
+            "diterima",
+            "jari pemilik");
+
+        Serial.println();
+        Serial.println(
+            "AKSES DITERIMA!");
+
+        delay(3000);
+
+        Serial.println();
+        Serial.println(
+            "Silakan tempelkan jari...");
+
+        return;
+    }
+
+    // ======================================
+    // FINGERPRINT TERDAFTAR TAPI BUKAN
+    // PEMILIK LOCKER
+    // ======================================
+
+    Serial.println();
+    Serial.println(
+        "FINGERPRINT TERDAFTAR");
+
+    Serial.println(
+        "Tetapi bukan pemilik locker ini.");
+
+    kirimAktivitas(
+        idSensor,
+        finger.confidence,
+        "FP" + String(idSensor),
+        "",
+        "",
+        "ditolak",
+        "bukan jari pemilik");
+
+    Serial.println();
+    Serial.println(
+        "AKSES DITOLAK!");
+
+    delay(3000);
+
+    Serial.println();
+    Serial.println(
+        "Silakan tempelkan jari...");
+}

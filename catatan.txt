@@ -1,0 +1,8 @@
+build
+& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run
+
+upload
+& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run --target upload
+
+serial monitor
+& "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor
