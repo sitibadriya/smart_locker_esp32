@@ -5,68 +5,72 @@
 #include <Adafruit_Fingerprint.h>
 
 // ======================================================
-// UART FINGERPRINT
+// KONFIGURASI UART FINGERPRINT
 // ======================================================
 
 #define RXD2 16
 #define TXD2 17
 
 // ======================================================
-// OBJEK FINGERPRINT
+// DEKLARASI OBJEK FINGERPRINT
 // ======================================================
 
 extern HardwareSerial mySerial;
 extern Adafruit_Fingerprint finger;
 
 // ======================================================
-// INISIALISASI
+// INISIALISASI SENSOR
 // ======================================================
 
 bool inisialisasiFingerprint();
 
 // ======================================================
-// CEK TEMPLATE
+// PENGELOLAAN ID FINGERPRINT
 // ======================================================
 
+// Memeriksa apakah ID sensor sudah digunakan.
 bool cekFingerprintTersimpan(int id);
 
-// ======================================================
-// HITUNG TEMPLATE
-// ======================================================
-
+// Menghitung jumlah template fingerprint pada sensor.
+// Mengembalikan -1 jika terjadi kegagalan.
 int hitungFingerprint();
 
-// ======================================================
-// CARI ID SENSOR KOSONG
-// ======================================================
-
+// Mencari ID sensor yang belum digunakan.
+// Mengembalikan -1 jika tidak ditemukan.
 int cariIdKosong();
 
 // ======================================================
-// CARI FINGERPRINT SAAT AUTENTIKASI
+// AUTENTIKASI FINGERPRINT
 // ======================================================
 
+// Mencari sidik jari yang cocok pada sensor.
+// Mengembalikan ID sensor jika ditemukan,
+// atau -1 jika tidak ditemukan.
 int cariFingerprint();
 
 // ======================================================
-// ENROLL SATU FINGERPRINT
+// PENDAFTARAN FINGERPRINT
 // ======================================================
 
+// Mendaftarkan satu sidik jari dengan dua kali scan.
+// Parameter timeoutMs memiliki nilai default 30000 ms.
 bool daftarSatuFingerprint(
     int id,
     String namaJari,
     unsigned long timeoutMs = 30000);
 
-// ======================================================
-// MENUNGGU JARI DIANGKAT
-// ======================================================
-
+// Menunggu sampai jari diangkat dari sensor.
 void tungguJariDiangkat();
 
 // ======================================================
-// HAPUS SEMUA TEMPLATE FINGERPRINT
+// PENGHAPUSAN TEMPLATE FINGERPRINT
 // ======================================================
 
+// Menghapus satu template berdasarkan ID sensor.
+bool hapusFingerprint(int id);
+
+// Menghapus seluruh template fingerprint.
+// Gunakan hanya ketika reset database memang diperlukan.
 bool hapusSemuaFingerprint();
 
 #endif

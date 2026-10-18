@@ -1,86 +1,54 @@
+
 #include "fingerprint.h"
 
 // ======================================================
-// UART
+// UART DAN OBJEK SENSOR
 // ======================================================
 
 HardwareSerial mySerial(2);
-
-Adafruit_Fingerprint finger =
-    Adafruit_Fingerprint(&mySerial);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 
 // ======================================================
-// INISIALISASI FINGERPRINT
+// INISIALISASI SENSOR FINGERPRINT
 // ======================================================
 
 bool inisialisasiFingerprint()
 {
     Serial.println();
-    Serial.println(
-        "======================================");
+    Serial.println("======================================");
+    Serial.println(" MEMERIKSA SENSOR FINGERPRINT");
+    Serial.println("======================================");
 
-    Serial.println(
-        " MEMERIKSA SENSOR FINGERPRINT");
-
-    Serial.println(
-        "======================================");
-
-    mySerial.begin(
-        57600,
-        SERIAL_8N1,
-        RXD2,
-        TXD2);
-
+    mySerial.begin(57600, SERIAL_8N1, RXD2, TXD2);
     delay(300);
 
     finger.begin(57600);
-
     delay(300);
 
     if (!finger.verifyPassword())
     {
-        Serial.println(
-            "Sensor fingerprint TIDAK TERDETEKSI!");
-
-        Serial.println(
-            "Periksa koneksi TX/RX/GND/VCC.");
-
+        Serial.println("Sensor fingerprint TIDAK TERDETEKSI!");
+        Serial.println("Periksa koneksi dan konfigurasi UART.");
         return false;
     }
 
-    Serial.println(
-        "Sensor fingerprint TERDETEKSI!");
+    Serial.println("Sensor fingerprint TERDETEKSI!");
 
-    if (
-        finger.getParameters() ==
-        FINGERPRINT_OK)
+    if (finger.getParameters() == FINGERPRINT_OK)
     {
-        Serial.print(
-            "Kapasitas sensor: ");
-
-        Serial.println(
-            finger.capacity);
+        Serial.print("Kapasitas sensor: ");
+        Serial.println(finger.capacity);
     }
 
-    // --------------------------------------------------
-    // PASTIKAN TIDAK ADA JARI DI SENSOR
-    // --------------------------------------------------
+    Serial.println("Memeriksa kondisi sensor...");
 
-    Serial.println(
-        "Memeriksa kondisi sensor...");
+    unsigned long mulai = millis();
 
-    unsigned long mulai =
-        millis();
-
-    while (
-        millis() - mulai < 3000)
+    while (millis() - mulai < 3000)
     {
-        uint8_t hasil =
-            finger.getImage();
+        uint8_t hasil = finger.getImage();
 
-        if (
-            hasil ==
-            FINGERPRINT_NOFINGER)
+        if (hasil == FINGERPRINT_NOFINGER)
         {
             break;
         }
@@ -88,49 +56,36 @@ bool inisialisasiFingerprint()
         delay(100);
     }
 
-    Serial.println(
-        "Fingerprint SIAP.");
-
+    Serial.println("Fingerprint SIAP.");
     return true;
 }
 
 // ======================================================
-// CEK APAKAH ID SUDAH TERISI
+// CEK TEMPLATE BERDASARKAN ID
 // ======================================================
 
 bool cekFingerprintTersimpan(int id)
 {
-    if (
-        id <= 0 ||
-        id > 300)
+    if (id <= 0 || id > 300)
     {
         return false;
     }
 
-    uint8_t hasil =
-        finger.loadModel(id);
-
-    if (
-        hasil == FINGERPRINT_OK)
-    {
-        return true;
-    }
-
-    return false;
+    uint8_t hasil = finger.loadModel(id);
+    return hasil == FINGERPRINT_OK;
 }
 
 // ======================================================
-// HITUNG FINGERPRINT
+// HITUNG JUMLAH TEMPLATE
 // ======================================================
 
 int hitungFingerprint()
 {
-    uint8_t hasil =
-        finger.getTemplateCount();
+    uint8_t hasil = finger.getTemplateCount();
 
-    if (
-        hasil != FINGERPRINT_OK)
+    if (hasil != FINGERPRINT_OK)
     {
+        Serial.println("Gagal menghitung template fingerprint.");
         return -1;
     }
 
@@ -143,18 +98,23 @@ int hitungFingerprint()
 
 int cariIdKosong()
 {
-    for (
-        int id = 1;
-        id <= 300;
-        id++)
+    if (!finger.verifyPassword())
     {
-        if (
-            !cekFingerprintTersimpan(id))
+        Serial.println("Sensor tidak siap. Pencarian ID dibatalkan.");
+        return -1;
+    }
+
+    for (int id = 1; id <= 300; id++)
+    {
+        if (!cekFingerprintTersimpan(id))
         {
+            Serial.print("ID sensor kosong ditemukan: ");
+            Serial.println(id);
             return id;
         }
     }
 
+    Serial.println("Tidak ditemukan ID sensor yang kosong.");
     return -1;
 }
 
@@ -162,33 +122,24 @@ int cariIdKosong()
 // TUNGGU JARI TERDETEKSI
 // ======================================================
 
-static bool tungguJariTerdeteksi(
-    unsigned long timeoutMs)
+static bool tungguJariTerdeteksi(unsigned long timeoutMs)
 {
-    unsigned long mulai =
-        millis();
+    unsigned long mulai = millis();
 
-    while (
-        millis() - mulai < timeoutMs)
+    while (millis() - mulai < timeoutMs)
     {
-        uint8_t hasil =
-            finger.getImage();
+        uint8_t hasil = finger.getImage();
 
-        if (
-            hasil == FINGERPRINT_OK)
+        if (hasil == FINGERPRINT_OK)
         {
             return true;
         }
 
-        if (
-            hasil != FINGERPRINT_NOFINGER &&
+        if (hasil != FINGERPRINT_NOFINGER &&
             hasil != FINGERPRINT_PACKETRECIEVEERR)
         {
-            Serial.print(
-                "Status sensor: ");
-
-            Serial.println(
-                hasil);
+            Serial.print("Status sensor: ");
+            Serial.println(hasil);
         }
 
         delay(100);
@@ -203,204 +154,177 @@ static bool tungguJariTerdeteksi(
 
 void tungguJariDiangkat()
 {
-    Serial.println();
-    Serial.println(
-        "Angkat jari dari sensor...");
+    Serial.println("Angkat jari dari sensor...");
 
-    unsigned long mulai =
-        millis();
+    unsigned long mulai = millis();
 
-    while (
-        millis() - mulai < 15000)
+    while (millis() - mulai < 15000)
     {
-        uint8_t hasil =
-            finger.getImage();
+        uint8_t hasil = finger.getImage();
 
-        if (
-            hasil == FINGERPRINT_NOFINGER)
+        if (hasil == FINGERPRINT_NOFINGER)
         {
-            Serial.println(
-                "Jari sudah diangkat.");
-
+            Serial.println("Jari sudah diangkat.");
             delay(300);
-
             return;
         }
 
         delay(100);
     }
 
-    Serial.println(
-        "Peringatan: waktu menunggu jari "
-        "diangkat habis.");
+    Serial.println("Peringatan: waktu menunggu jari diangkat habis.");
 }
 
 // ======================================================
-// HAPUS SEMUA DATABASE FINGERPRINT
+// AUTENTIKASI: BACA DAN CARI SIDIK JARI
+// ======================================================
+
+int cariFingerprint()
+{
+    Serial.println("Tempelkan jari pada sensor (timeout 10 detik).");
+
+    unsigned long mulai = millis();
+    uint8_t hasil = FINGERPRINT_NOFINGER;
+
+    // Tunggu sampai jari terdeteksi
+    while (millis() - mulai < 10000)
+    {
+        hasil = finger.getImage();
+
+        if (hasil == FINGERPRINT_OK)
+        {
+            Serial.println("Gambar jari berhasil diambil.");
+            break;
+        }
+
+        if (hasil != FINGERPRINT_NOFINGER &&
+            hasil != FINGERPRINT_PACKETRECIEVEERR)
+        {
+            Serial.print("Gagal membaca sensor. Kode: ");
+            Serial.println(hasil);
+        }
+
+        delay(100);
+    }
+
+    if (hasil != FINGERPRINT_OK)
+    {
+        Serial.println("Timeout: jari tidak terdeteksi.");
+        return -1;
+    }
+
+    hasil = finger.image2Tz();
+
+    if (hasil != FINGERPRINT_OK)
+    {
+        Serial.print("Fingerprint gagal diproses. Kode: ");
+        Serial.println(hasil);
+        tungguJariDiangkat();
+        return -1;
+    }
+
+    hasil = finger.fingerSearch();
+
+    if (hasil == FINGERPRINT_OK)
+    {
+        Serial.println("Sidik jari DITEMUKAN.");
+
+        Serial.print("ID Sensor: ");
+        Serial.println(finger.fingerID);
+
+        Serial.print("Kecocokan: ");
+        Serial.println(finger.confidence);
+
+        int id = finger.fingerID;
+        tungguJariDiangkat();
+        return id;
+    }
+
+    if (hasil == FINGERPRINT_NOTFOUND)
+    {
+        Serial.println("Sidik jari TIDAK DITEMUKAN.");
+        tungguJariDiangkat();
+        return -2; // Menandakan sidik jari tidak terdaftar
+    }
+
+    Serial.print("Pencarian fingerprint gagal. Kode: ");
+    Serial.println(hasil);
+
+    tungguJariDiangkat();
+    return -1;
+}
+
+// ======================================================
+// HAPUS SATU TEMPLATE
+// ======================================================
+
+bool hapusFingerprint(int id)
+{
+    Serial.println();
+    Serial.println("=== MENGHAPUS FINGERPRINT ===");
+
+    if (id <= 0 || id > 300)
+    {
+        Serial.println("ID sensor tidak valid.");
+        return false;
+    }
+
+    if (!finger.verifyPassword())
+    {
+        Serial.println("Sensor fingerprint tidak siap.");
+        return false;
+    }
+
+    uint8_t hasil = finger.deleteModel(id);
+
+    if (hasil == FINGERPRINT_OK)
+    {
+        Serial.print("Fingerprint ID ");
+        Serial.print(id);
+        Serial.println(" berhasil dihapus.");
+        return true;
+    }
+
+    Serial.print("Gagal menghapus fingerprint. Kode: ");
+    Serial.println(hasil);
+    return false;
+}
+
+// ======================================================
+// HAPUS SELURUH DATABASE SENSOR
+// PERHATIAN: MENGHAPUS SEMUA TEMPLATE
 // ======================================================
 
 bool hapusSemuaFingerprint()
 {
     Serial.println();
-    Serial.println(
-        "======================================");
+    Serial.println("=== RESET DATABASE FINGERPRINT ===");
 
-    Serial.println(
-        " MEMBERSIHKAN DATABASE FINGERPRINT");
-
-    Serial.println(
-        "======================================");
-
-    if (
-        !finger.verifyPassword())
+    if (!finger.verifyPassword())
     {
-        Serial.println(
-            "Sensor fingerprint tidak siap.");
-
+        Serial.println("Sensor fingerprint tidak siap.");
         return false;
     }
 
-    // Pastikan jari tidak menempel
     tungguJariDiangkat();
 
-    uint8_t hasil =
-        finger.emptyDatabase();
+    uint8_t hasil = finger.emptyDatabase();
 
-    if (
-        hasil == FINGERPRINT_OK)
+    if (hasil == FINGERPRINT_OK)
     {
-        Serial.println(
-            "Database fingerprint berhasil "
-            "dikosongkan.");
-
+        Serial.println("Database fingerprint berhasil dikosongkan.");
         delay(500);
-
         return true;
     }
 
-    Serial.print(
-        "Gagal menghapus database fingerprint.");
-
-    Serial.print(
-        " Kode: ");
-
-    Serial.println(
-        hasil);
-
+    Serial.print("Gagal mengosongkan database. Kode: ");
+    Serial.println(hasil);
     return false;
 }
 
 // ======================================================
-// CARI FINGERPRINT
-// ======================================================
-
-int cariFingerprint()
-{
-    // --------------------------------------------------
-    // AMBIL GAMBAR
-    // --------------------------------------------------
-
-    uint8_t hasil =
-        finger.getImage();
-
-    if (
-        hasil == FINGERPRINT_NOFINGER)
-    {
-        return -1;
-    }
-
-    if (
-        hasil != FINGERPRINT_OK)
-    {
-        Serial.println();
-        Serial.print(
-            "Gagal mengambil gambar. Kode: ");
-
-        Serial.println(
-            hasil);
-
-        return -1;
-    }
-
-    // --------------------------------------------------
-    // KONVERSI GAMBAR
-    // --------------------------------------------------
-
-    hasil =
-        finger.image2Tz();
-
-    if (
-        hasil != FINGERPRINT_OK)
-    {
-        Serial.println();
-        Serial.println(
-            "Fingerprint tidak dapat diproses.");
-
-        tungguJariDiangkat();
-
-        return -1;
-    }
-
-    // --------------------------------------------------
-    // CARI KECocokan
-    // --------------------------------------------------
-
-    hasil =
-        finger.fingerSearch();
-
-    if (
-        hasil == FINGERPRINT_OK)
-    {
-        Serial.println();
-        Serial.println(
-            "Sidik jari DITEMUKAN.");
-
-        Serial.print(
-            "ID Sensor : ");
-
-        Serial.println(
-            finger.fingerID);
-
-        Serial.print(
-            "Kecocokan : ");
-
-        Serial.println(
-            finger.confidence);
-
-        int id =
-            finger.fingerID;
-
-        tungguJariDiangkat();
-
-        return id;
-    }
-
-    if (
-        hasil == FINGERPRINT_NOTFOUND)
-    {
-        Serial.println();
-        Serial.println(
-            "Sidik jari TIDAK DITEMUKAN.");
-
-        tungguJariDiangkat();
-
-        return -1;
-    }
-
-    Serial.println();
-    Serial.print(
-        "Pencarian fingerprint gagal. Kode: ");
-
-    Serial.println(
-        hasil);
-
-    tungguJariDiangkat();
-
-    return -1;
-}
-
-// ======================================================
-// DAFTAR SATU FINGERPRINT
+// PENDAFTARAN SATU FINGERPRINT
+// SETIAP JARI DIPINDAI DUA KALI
 // ======================================================
 
 bool daftarSatuFingerprint(
@@ -409,257 +333,124 @@ bool daftarSatuFingerprint(
     unsigned long timeoutMs)
 {
     Serial.println();
-    Serial.println(
-        "--------------------------------------");
+    Serial.println("--------------------------------------");
+    Serial.println(" PENDAFTARAN JARI");
+    Serial.println("--------------------------------------");
 
-    Serial.println(
-        " PENDAFTARAN JARI");
+    Serial.print("Jari      : ");
+    Serial.println(namaJari);
 
-    Serial.println(
-        "--------------------------------------");
+    Serial.print("ID Sensor : ");
+    Serial.println(id);
 
-    Serial.print(
-        "Jari       : ");
-
-    Serial.println(
-        namaJari);
-
-    Serial.print(
-        "ID Sensor  : ");
-
-    Serial.println(
-        id);
-
-    // --------------------------------------------------
-    // CEK ID
-    // --------------------------------------------------
-
-    if (
-        id <= 0 ||
-        id > 300)
+    if (id <= 0 || id > 300)
     {
-        Serial.println(
-            "ID sensor tidak valid.");
-
+        Serial.println("ID sensor tidak valid.");
         return false;
     }
 
-    // --------------------------------------------------
-    // PASTIKAN ID KOSONG
-    // --------------------------------------------------
-
-    if (
-        cekFingerprintTersimpan(id))
+    if (!finger.verifyPassword())
     {
-        Serial.println(
-            "ID sensor sudah digunakan.");
-
+        Serial.println("Sensor tidak siap.");
         return false;
     }
 
-    // --------------------------------------------------
-    // PASTIKAN SENSOR SIAP
-    // --------------------------------------------------
-
-    if (
-        !finger.verifyPassword())
+    if (cekFingerprintTersimpan(id))
     {
-        Serial.println(
-            "Sensor tidak siap.");
-
+        Serial.println("ID sensor sudah digunakan.");
         return false;
     }
-
-    // --------------------------------------------------
-    // PASTIKAN JARI TIDAK MENEMPEL
-    // --------------------------------------------------
 
     tungguJariDiangkat();
 
-    // ==================================================
-    // SCAN PERTAMA
-    // ==================================================
+    // Scan pertama
+    Serial.print("Tempelkan ");
+    Serial.print(namaJari);
+    Serial.println(" pada sensor.");
 
-    Serial.println();
-    Serial.print(
-        "Tempelkan ");
-
-    Serial.print(
-        namaJari);
-
-    Serial.println(
-        " pada sensor.");
-
-    if (
-        !tungguJariTerdeteksi(
-            timeoutMs))
+    if (!tungguJariTerdeteksi(timeoutMs))
     {
-        Serial.println();
-        Serial.println(
-            "TIMEOUT: jari tidak terdeteksi.");
-
+        Serial.println("TIMEOUT: jari tidak terdeteksi.");
         return false;
     }
 
-    Serial.println(
-        "Jari terdeteksi.");
+    uint8_t hasil = finger.image2Tz(1);
 
-    // --------------------------------------------------
-    // KONVERSI SCAN PERTAMA
-    // --------------------------------------------------
-
-    uint8_t hasil =
-        finger.image2Tz(1);
-
-    if (
-        hasil != FINGERPRINT_OK)
+    if (hasil != FINGERPRINT_OK)
     {
-        Serial.println();
-        Serial.print(
-            "Scan pertama gagal. Kode: ");
-
-        Serial.println(
-            hasil);
-
+        Serial.print("Scan pertama gagal. Kode: ");
+        Serial.println(hasil);
         tungguJariDiangkat();
-
         return false;
     }
 
-    Serial.println(
-        "Scan pertama berhasil.");
-
-    // --------------------------------------------------
-    // ANGKAT JARI
-    // --------------------------------------------------
-
+    Serial.println("Scan pertama berhasil.");
     tungguJariDiangkat();
 
-    // ==================================================
-    // SCAN KEDUA
-    // ==================================================
+    // Scan kedua
+    Serial.print("Tempelkan kembali ");
+    Serial.print(namaJari);
+    Serial.println(" yang sama.");
 
-    Serial.println();
-    Serial.print(
-        "Tempelkan kembali ");
-
-    Serial.print(
-        namaJari);
-
-    Serial.println(
-        " yang sama.");
-
-    if (
-        !tungguJariTerdeteksi(
-            timeoutMs))
+    if (!tungguJariTerdeteksi(timeoutMs))
     {
-        Serial.println();
-        Serial.println(
-            "TIMEOUT: scan kedua gagal.");
-
+        Serial.println("TIMEOUT: scan kedua gagal.");
         return false;
     }
 
-    Serial.println(
-        "Jari terdeteksi kembali.");
+    hasil = finger.image2Tz(2);
 
-    // --------------------------------------------------
-    // KONVERSI SCAN KEDUA
-    // --------------------------------------------------
-
-    hasil =
-        finger.image2Tz(2);
-
-    if (
-        hasil != FINGERPRINT_OK)
+    if (hasil != FINGERPRINT_OK)
     {
-        Serial.println();
-        Serial.print(
-            "Scan kedua gagal. Kode: ");
-
-        Serial.println(
-            hasil);
-
+        Serial.print("Scan kedua gagal. Kode: ");
+        Serial.println(hasil);
         tungguJariDiangkat();
-
         return false;
     }
 
-    Serial.println(
-        "Scan kedua berhasil.");
-
-    // --------------------------------------------------
-    // ANGKAT JARI
-    // --------------------------------------------------
-
+    Serial.println("Scan kedua berhasil.");
     tungguJariDiangkat();
 
-    // ==================================================
-    // BUAT MODEL
-    // ==================================================
+    // Buat template dari dua scan
+    Serial.println("Membuat template fingerprint...");
 
-    Serial.println();
-    Serial.println(
-        "Membuat template fingerprint...");
+    hasil = finger.createModel();
 
-    hasil =
-        finger.createModel();
-
-    if (
-        hasil != FINGERPRINT_OK)
+    if (hasil != FINGERPRINT_OK)
     {
-        Serial.println();
-        Serial.print(
-            "Fingerprint tidak cocok "
-            "atau model gagal dibuat.");
-
-        Serial.print(
-            " Kode: ");
-
-        Serial.println(
-            hasil);
-
+        Serial.print("Model gagal dibuat. Kode: ");
+        Serial.println(hasil);
         return false;
     }
 
-    Serial.println(
-        "Template fingerprint berhasil dibuat.");
+    // Simpan template
+    Serial.println("Menyimpan fingerprint ke sensor...");
 
-    // ==================================================
-    // SIMPAN MODEL
-    // ==================================================
+    hasil = finger.storeModel(id);
 
-    Serial.println();
-    Serial.println(
-        "Menyimpan fingerprint ke sensor...");
-
-    hasil =
-        finger.storeModel(id);
-
-    if (
-        hasil != FINGERPRINT_OK)
+    if (hasil != FINGERPRINT_OK)
     {
-        Serial.println();
-        Serial.print(
-            "Gagal menyimpan fingerprint.");
-
-        Serial.print(
-            " Kode: ");
-
-        Serial.println(
-            hasil);
-
+        Serial.print("Gagal menyimpan fingerprint. Kode: ");
+        Serial.println(hasil);
         return false;
     }
 
-    Serial.println(
-        "Fingerprint berhasil disimpan.");
+    // Verifikasi
+    Serial.println("Memverifikasi template...");
 
-    Serial.print(
-        "ID Sensor: ");
+    hasil = finger.loadModel(id);
 
-    Serial.println(
-        id);
+    if (hasil != FINGERPRINT_OK)
+    {
+        Serial.print("Verifikasi template gagal. Kode: ");
+        Serial.println(hasil);
+        Serial.println("Pendaftaran belum dinyatakan berhasil.");
+        return false;
+    }
+
+    Serial.println("Fingerprint berhasil disimpan dan diverifikasi.");
+    Serial.print("ID Sensor: ");
+    Serial.println(id);
 
     return true;
 }
