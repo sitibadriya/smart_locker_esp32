@@ -6,3 +6,16 @@ upload
 
 serial monitor
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor
+
+===
+
+git status
+
+# 1. Menambahkan semua file yang dimodifikasi ke area staging
+git add .
+
+# 2. Membuat commit dengan pesan deskriptif
+git commit -m " "
+
+# 3. Mengunggah commit terbaru ke GitHub/repositori remote
+git push origin main
