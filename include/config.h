@@ -12,7 +12,7 @@
 // Hardware Pinout ESP32
 #define RXD2 16
 #define TXD2 17
-#define RELAY_PIN 23
+#define RELAY_PIN 18
 
 // Metadata Perangkat & Loker
 #define DEVICE_ID "esp32-locker-01"

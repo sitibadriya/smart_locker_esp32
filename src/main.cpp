@@ -19,6 +19,7 @@
 
 // ===============================
 // FIREBASE
+// (sebaiknya dipindah ke secrets.h yang masuk .gitignore)
 // ===============================
 #define API_KEY "AIzaSyDLZr4hM-aYSckpFVSYZilsJAhgQqsK0yE"
 #define FIREBASE_PROJECT_ID "smart-locker-iot-10a0e"
@@ -34,12 +35,27 @@
 // ======================================================
 // PIN PERANGKAT KERAS (RELAY & SENSOR PINTU)
 // ======================================================
-#define RELAY_PIN 23
-#define RELAY_ON LOW
-#define RELAY_OFF HIGH
-#define DURASI_BUKA_MS 4000
+#define RELAY_PIN 18
+#define DURASI_BUKA_MS 10000
 
 #define SENSOR_PINTU_PIN 4 // Sensor magnetik YL-99
+
+// ======================================================
+// KONTROL RELAY (MODUL ACTIVE-LOW, SINYAL ESP32 3,3V)
+// relayOn  : IN ditarik ke GND -> relay menyala -> solenoid masuk (terbuka)
+// relayOff : pin dilepas (INPUT) -> modul menarik IN ke 5V -> relay mati
+//            -> solenoid menonjol keluar (terkunci)
+// ======================================================
+void relayOn()
+{
+    pinMode(RELAY_PIN, OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
+}
+
+void relayOff()
+{
+    pinMode(RELAY_PIN, INPUT);
+}
 
 // ======================================================
 // FIREBASE CLIENT
@@ -55,15 +71,19 @@ Firestore::Documents Docs;
 // ======================================================
 // STATUS SISTEM
 // ======================================================
+bool firebaseStarted = false;
 bool firebaseReady = false;
 bool fingerprintReady = false;
 bool prosesEnrollmentAktif = false;
 
 unsigned long waktuCekEnrollment = 0;
-const unsigned long INTERVAL_CEK_ENROLLMENT = 2000;
+const unsigned long INTERVAL_CEK_ENROLLMENT = 3000;
 
-unsigned long waktuCekRemoteUnlock = 0;
-const unsigned long INTERVAL_CEK_REMOTE = 1500;
+unsigned long waktuCekLocker = 0;
+const unsigned long INTERVAL_CEK_LOCKER = 3000;
+
+unsigned long waktuReconnectWiFi = 0;
+unsigned long waktuRetryFingerprint = 0;
 
 // ======================================================
 // STRUKTUR ENROLLMENT 5 JARI TETAP
@@ -118,9 +138,33 @@ bool ambilBoolean(JsonObject fields, const char *namaField, bool nilaiDefault = 
 bool bacaDokumen(String documentPath, String &hasil)
 {
     hasil = Docs.get(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), documentPath, GetDocumentOptions());
+
     if (aClient.lastError().code() != 0)
+    {
+        Serial.printf("[FIRESTORE] Gagal baca %s | kode: %d | pesan: %s\n",
+                      documentPath.c_str(),
+                      aClient.lastError().code(),
+                      aClient.lastError().message().c_str());
         return false;
+    }
+
     return hasil.length() > 0;
+}
+
+// ======================================================
+// TAHAN RELAY SELAMA DURASI BUKA TANPA MEMBLOKIR FIREBASE
+// (app.loop() tetap jalan agar token tidak kedaluwarsa)
+// ======================================================
+void tahanRelayLaluKunci(unsigned long waktuMulai)
+{
+    while (millis() - waktuMulai < DURASI_BUKA_MS)
+    {
+        app.loop();
+        Docs.loop();
+        delay(10);
+    }
+    relayOff();
+    Serial.println("Solenoid kembali terkunci.");
 }
 
 // ======================================================
@@ -215,6 +259,21 @@ bool simpanRiwayatAkses(int idSensor, String idFingerprint, String idSantri, Str
 }
 
 // ======================================================
+// ROLLBACK: HAPUS TEMPLATE YANG SUDAH TERDAFTAR DI SENSOR
+// ======================================================
+void rollbackSensor(int ids[], int jumlah)
+{
+    for (int i = 0; i < jumlah; i++)
+    {
+        if (ids[i] > 0)
+        {
+            hapusFingerprint(ids[i]);
+            ids[i] = -1;
+        }
+    }
+}
+
+// ======================================================
 // PROSES ENROLLMENT OTOMATIS BERDASARKAN PERINTAH FLUTTER
 // ======================================================
 void cekPerintahEnrollment()
@@ -288,6 +347,8 @@ void cekPerintahEnrollment()
         bool berhasil = daftarSatuFingerprint(idSensor, namaJari[i], 30000);
         if (!berhasil)
         {
+            // Bersihkan slot ini kalau-kalau template sempat tersimpan
+            hapusFingerprint(idSensor);
             semuaBerhasil = false;
             break;
         }
@@ -298,6 +359,7 @@ void cekPerintahEnrollment()
 
     if (!semuaBerhasil)
     {
+        rollbackSensor(idsSensor, 5);
         updateStatusEnrollmentCommand("failed", "Enrollment 5 jari gagal/tidak lengkap.");
         prosesEnrollmentAktif = false;
         return;
@@ -314,6 +376,7 @@ void cekPerintahEnrollment()
 
     if (!semuaBerhasil)
     {
+        rollbackSensor(idsSensor, 5);
         updateStatusEnrollmentCommand("failed", "Penyimpanan mapping ke Firestore gagal.");
         prosesEnrollmentAktif = false;
         return;
@@ -321,6 +384,7 @@ void cekPerintahEnrollment()
 
     if (!aktifkanBatch(batchId, idSantri))
     {
+        rollbackSensor(idsSensor, 5);
         updateStatusEnrollmentCommand("failed", "Gagal mengaktifkan batch di locker-config.");
         prosesEnrollmentAktif = false;
         return;
@@ -332,15 +396,96 @@ void cekPerintahEnrollment()
 }
 
 // ======================================================
-// CEK REMOTE UNLOCK DARI FLUTTER
+// REMOTE UNLOCK DARI FLUTTER
 // ======================================================
-void cekPerintahRemoteUnlock()
+void prosesRemoteUnlock(const String &configPath)
+{
+    Serial.println("\n[REMOTE UNLOCK] Perintah pembukaan jarak jauh diterima!");
+
+    // Kembalikan ke IDLE dulu. Kalau gagal, batalkan agar tidak terbuka berulang.
+    Document<Values::Value> dokumen;
+    dokumen.add("remoteCommand", Values::Value(Values::StringValue("IDLE")));
+    PatchDocumentOptions patchOptions(DocumentMask("remoteCommand"), DocumentMask(), Precondition());
+    Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), configPath, patchOptions, dokumen);
+
+    if (aClient.lastError().code() != 0)
+    {
+        Serial.println("[REMOTE UNLOCK] Gagal mereset perintah. Dibatalkan, akan dicoba lagi.");
+        return;
+    }
+
+    relayOn();
+    unsigned long mulai = millis();
+
+    simpanRiwayatAkses(0, "REMOTE_UNLOCK", "-", "Admin / Pembina", "DIIZINKAN", "Buka locker via Remote Unlock Flutter.");
+
+    tahanRelayLaluKunci(mulai);
+}
+
+// ======================================================
+// RESET / GANTI PEMILIK DARI FLUTTER
+// ======================================================
+void prosesResetLocker(const String &configPath, const String &activeBatchId)
+{
+    Serial.println("\n[RESET LOCKER] Perintah Reset / Ganti Pemilik diterima!");
+    Serial.println("[RESET LOCKER] Mengosongkan template sidik jari di sensor...");
+
+    // Satu locker = satu pemilik, jadi seluruh template sensor dihapus.
+    if (!hapusSemuaFingerprint())
+    {
+        Serial.println("[RESET LOCKER] Gagal menghapus sensor. Firestore tidak diubah, akan dicoba lagi.");
+        return;
+    }
+
+    // Nonaktifkan mapping batch lama di Firestore
+    if (activeBatchId.length() > 0)
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            String mappingPath = "fingerprint-mapping/" + String(ID_LOCKER) + "_" + activeBatchId + "_" + labelFingerprint[i];
+
+            Document<Values::Value> patchMap;
+            patchMap.add("statusAktif", Values::Value(Values::BooleanValue(false)));
+            PatchDocumentOptions optMap(DocumentMask("statusAktif"), DocumentMask(), Precondition());
+            Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), mappingPath, optMap, patchMap);
+        }
+    }
+
+    // Kosongkan konfigurasi locker
+    Document<Values::Value> dokumen;
+    dokumen.add("activeBatchId", Values::Value(Values::StringValue("")));
+    dokumen.add("activeSantriId", Values::Value(Values::StringValue("")));
+    dokumen.add("resetCommand", Values::Value(Values::StringValue("IDLE")));
+
+    String waktu = dapatkanWaktuUTC();
+    if (waktu.length() > 0)
+        dokumen.add("updatedAt", Values::Value(Values::TimestampValue(waktu)));
+
+    PatchDocumentOptions patchOptions(DocumentMask("activeBatchId,activeSantriId,resetCommand,updatedAt"), DocumentMask(), Precondition());
+    Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), configPath, patchOptions, dokumen);
+
+    if (aClient.lastError().code() != 0)
+    {
+        Serial.println("[RESET LOCKER] Gagal memperbarui locker-config. Akan dicoba lagi.");
+        return;
+    }
+
+    simpanRiwayatAkses(0, "RESET_OWNER", "-", "Admin / Pembina", "DISETUJUI", "Loker di-reset untuk penggantian pemilik baru.");
+
+    Serial.println("[RESET LOCKER] Loker berhasil di-reset. Siap untuk pendaftaran pemilik baru.");
+}
+
+// ======================================================
+// CEK PERINTAH LOCKER-CONFIG (REMOTE UNLOCK + RESET)
+// Satu kali baca dokumen untuk dua perintah, hemat kuota Firestore.
+// ======================================================
+void cekPerintahLocker()
 {
     if (prosesEnrollmentAktif)
         return;
-    if (millis() - waktuCekRemoteUnlock < INTERVAL_CEK_REMOTE)
+    if (millis() - waktuCekLocker < INTERVAL_CEK_LOCKER)
         return;
-    waktuCekRemoteUnlock = millis();
+    waktuCekLocker = millis();
 
     String hasil;
     String configPath = "locker-config/" + String(ID_LOCKER);
@@ -356,23 +501,19 @@ void cekPerintahRemoteUnlock()
     if (fields.isNull())
         return;
 
+    String resetCommand = ambilString(fields, "resetCommand");
     String remoteCommand = ambilString(fields, "remoteCommand");
+    String activeBatchId = ambilString(fields, "activeBatchId");
+
+    if (resetCommand == "RESET_OWNER")
+    {
+        prosesResetLocker(configPath, activeBatchId);
+        return;
+    }
+
     if (remoteCommand == "UNLOCK")
     {
-        Serial.println("\n[REMOTE UNLOCK] Perintah pembukaan jarak jauh diterima!");
-
-        // Reset remoteCommand agar kembali ke status IDLE
-        Document<Values::Value> dokumen;
-        dokumen.add("remoteCommand", Values::Value(Values::StringValue("IDLE")));
-        PatchDocumentOptions patchOptions(DocumentMask("remoteCommand"), DocumentMask(), Precondition());
-        Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), configPath, patchOptions, dokumen);
-
-        simpanRiwayatAkses(0, "REMOTE_UNLOCK", "-", "Admin / Pembina", "DIIZINKAN", "Buka locker via Remote Unlock Flutter.");
-
-        digitalWrite(RELAY_PIN, RELAY_ON);
-        delay(DURASI_BUKA_MS);
-        digitalWrite(RELAY_PIN, RELAY_OFF);
-        Serial.println("[REMOTE UNLOCK] Solenoid kembali terkunci.");
+        prosesRemoteUnlock(configPath);
     }
 }
 
@@ -395,6 +536,9 @@ bool cariMappingFingerprint(int idSensor, String &idFingerprint, String &idSantr
         return false;
 
     JsonObject configFields = configDoc["fields"];
+    if (configFields.isNull())
+        return false;
+
     String activeBatchId = ambilString(configFields, "activeBatchId");
 
     if (activeBatchId.length() == 0)
@@ -445,7 +589,7 @@ void prosesAutentikasiOtomatis()
     if (idSensor <= 0 && idSensor != -2)
         return;
 
-    // Jika sidik jari terdeteksi di sensor fisik tapi tidak ada di database lokal sensor
+    // Sidik jari terbaca tetapi tidak ada di database sensor
     if (idSensor == -2)
     {
         Serial.println("\n[AKSES DITOLAK] Sidik jari tidak terdaftar pada sensor.");
@@ -471,92 +615,43 @@ void prosesAutentikasiOtomatis()
     Serial.print("Santri: ");
     Serial.println(namaSantri);
 
+    // Buka solenoid dulu supaya tidak menunggu proses tulis riwayat ke Firestore
+    relayOn();
+    unsigned long mulai = millis();
+
     simpanRiwayatAkses(idSensor, idFingerprint, idSantri, namaSantri, "DIIZINKAN", "Fingerprint valid. Akses locker diberikan.");
 
-    digitalWrite(RELAY_PIN, RELAY_ON);
-    delay(DURASI_BUKA_MS);
-    digitalWrite(RELAY_PIN, RELAY_OFF);
-    Serial.println("Solenoid kembali terkunci.");
+    tahanRelayLaluKunci(mulai);
 }
+
 // ======================================================
-// CEK PERINTAH RESET / GANTI PEMILIK DARI FLUTTER
+// MULAI KONEKSI FIREBASE (DIPANGGIL SETELAH WIFI TERSAMBUNG)
 // ======================================================
-void cekPerintahResetLocker()
+void mulaiFirebase()
 {
-    if (prosesEnrollmentAktif)
-        return;
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    ssl_client.setInsecure();
 
-    String hasil;
-    String configPath = "locker-config/" + String(ID_LOCKER);
+    Serial.println("Menghubungkan Firebase...");
+    initializeApp(aClient, app, getAuth(user_auth), 120 * 1000);
+    app.getApp<Firestore::Documents>(Docs);
+    firebaseStarted = true;
 
-    if (!bacaDokumen(configPath, hasil))
-        return;
-
-    JsonDocument doc;
-    if (deserializeJson(doc, hasil))
-        return;
-
-    JsonObject fields = doc["fields"];
-    if (fields.isNull())
-        return;
-
-    String resetCommand = ambilString(fields, "resetCommand");
-    if (resetCommand == "RESET_OWNER")
+    unsigned long mulaiFirebaseMs = millis();
+    while (!app.ready() && millis() - mulaiFirebaseMs < 20000)
     {
-        Serial.println("\n[RESET LOCKER] Perintah Reset / Ganti Pemilik diterima!");
+        app.loop();
+        delay(100);
+    }
 
-        // 1. Ambil activeBatchId yang sedang aktif untuk menonaktifkan mapping-nya
-        String activeBatchId = ambilString(fields, "activeBatchId");
-
-        Serial.println("[RESET LOCKER] Menghapus template sidik jari dari sensor fisik...");
-
-        // Hapus slot ID 1 sampai 5 dari sensor sidik jari fisik
-        for (int i = 1; i <= 5; i++)
-        {
-            uint8_t p = finger.deleteModel(i);
-            if (p == FINGERPRINT_OK)
-            {
-                Serial.print("ID Sensor ");
-                Serial.print(i);
-                Serial.println(" berhasil dihapus.");
-            }
-        }
-
-        // 2. Jika ada batch aktif, ubah statusAktif mapping di Firestore menjadi false (opsional / pembersihan)
-        if (activeBatchId.length() > 0)
-        {
-            for (int i = 1; i <= 5; i++)
-            {
-                String labelFP = "FP0" + String(i);
-                String mappingDocId = String(ID_LOCKER) + "_" + activeBatchId + "_" + labelFP;
-                String mappingPath = "fingerprint-mapping/" + mappingDocId;
-
-                Document<Values::Value> patchMap;
-                patchMap.add("statusAktif", Values::Value(Values::BooleanValue(false)));
-                PatchDocumentOptions optMap(DocumentMask("statusAktif"), DocumentMask(), Precondition());
-                Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), mappingPath, optMap, patchMap);
-            }
-        }
-
-        // 3. Reset konfigurasi locker di Firestore (kosongkan activeBatchId dan activeSantriId)
-        Document<Values::Value> dokumen;
-        dokumen.add("activeBatchId", Values::Value(Values::StringValue("")));
-        dokumen.add("activeSantriId", Values::Value(Values::StringValue("")));
-        dokumen.add("resetCommand", Values::Value(Values::StringValue("IDLE")));
-
-        String waktu = dapatkanWaktuUTC();
-        if (waktu.length() > 0)
-        {
-            dokumen.add("updatedAt", Values::Value(Values::TimestampValue(waktu)));
-        }
-
-        PatchDocumentOptions patchOptions(DocumentMask("activeBatchId,activeSantriId,resetCommand,updatedAt"), DocumentMask(), Precondition());
-        Docs.patch(aClient, Firestore::Parent(FIREBASE_PROJECT_ID), configPath, patchOptions, dokumen);
-
-        // 4. Simpan riwayat aktivitas
-        simpanRiwayatAkses(0, "RESET_OWNER", "-", "Admin / Pembina", "DISETUJUI", "Loker di-reset untuk penggantian pemilik baru.");
-
-        Serial.println("[RESET LOCKER] Loker berhasil di-reset total. Siap untuk pendaftaran pemilik baru.");
+    if (app.ready())
+    {
+        firebaseReady = true;
+        Serial.println("Firebase Siap.");
+    }
+    else
+    {
+        Serial.println("Firebase belum siap, akan terus dicoba di latar belakang.");
     }
 }
 
@@ -568,8 +663,7 @@ void setup()
     Serial.begin(115200);
     delay(1000);
 
-    pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, RELAY_OFF);
+    relayOff(); // locker terkunci saat boot
 
     pinMode(SENSOR_PINTU_PIN, INPUT_PULLUP);
 
@@ -578,6 +672,7 @@ void setup()
     Serial.println("==================================");
 
     WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     Serial.print("Menghubungkan WiFi");
 
@@ -593,31 +688,11 @@ void setup()
     {
         Serial.print("WiFi Terhubung! IP: ");
         Serial.println(WiFi.localIP());
+        mulaiFirebase();
     }
     else
     {
-        Serial.println("WiFi Gagal! Sistem berjalan standby.");
-        return;
-    }
-
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    ssl_client.setInsecure();
-
-    Serial.println("Menghubungkan Firebase...");
-    initializeApp(aClient, app, getAuth(user_auth), 120 * 1000);
-    app.getApp<Firestore::Documents>(Docs);
-
-    unsigned long mulaiFirebase = millis();
-    while (!app.ready() && millis() - mulaiFirebase < 20000)
-    {
-        app.loop();
-        delay(100);
-    }
-
-    if (app.ready())
-    {
-        firebaseReady = true;
-        Serial.println("Firebase Siap.");
+        Serial.println("WiFi gagal. Akan dicoba lagi otomatis di loop.");
     }
 
     Serial.println("Menginisialisasi Sensor Sidik Jari...");
@@ -636,26 +711,56 @@ void setup()
 // ======================================================
 void loop()
 {
-    app.loop();
-    Docs.loop();
-
-    if (!firebaseReady || !fingerprintReady || WiFi.status() != WL_CONNECTED)
+    // Pemulihan WiFi
+    if (WiFi.status() != WL_CONNECTED)
     {
-        digitalWrite(RELAY_PIN, RELAY_OFF);
+        relayOff();
+        firebaseReady = false;
+
+        if (millis() - waktuReconnectWiFi > 10000)
+        {
+            waktuReconnectWiFi = millis();
+            Serial.println("WiFi terputus. Mencoba menyambung ulang...");
+            WiFi.reconnect();
+        }
         delay(10);
         return;
     }
 
-    // 1. Memeriksa perintah enrollment dari aplikasi Flutter secara real-time
+    // WiFi sudah tersambung tetapi Firebase belum pernah dimulai
+    if (!firebaseStarted)
+    {
+        mulaiFirebase();
+    }
+
+    if (firebaseStarted)
+    {
+        app.loop();
+        Docs.loop();
+        firebaseReady = app.ready();
+    }
+
+    // Pemulihan sensor sidik jari
+    if (!fingerprintReady && millis() - waktuRetryFingerprint > 10000)
+    {
+        waktuRetryFingerprint = millis();
+        fingerprintReady = inisialisasiFingerprint();
+    }
+
+    if (!firebaseReady || !fingerprintReady)
+    {
+        relayOff();
+        delay(10);
+        return;
+    }
+
+    // 1. Perintah enrollment dari aplikasi Flutter
     cekPerintahEnrollment();
 
-    // 2. Memeriksa perintah remote unlock dari aplikasi Flutter
-    cekPerintahRemoteUnlock();
+    // 2. Perintah remote unlock dan reset dari aplikasi Flutter (satu kali baca)
+    cekPerintahLocker();
 
-    // 3. Memeriksa perintah reset / ganti pemilik dari aplikasi Flutter
-    cekPerintahResetLocker();
-
-    // 4. Autentikasi otomatis berjalan terus-menerus secara real-time
+    // 3. Autentikasi sidik jari otomatis
     prosesAutentikasiOtomatis();
 
     delay(20);
