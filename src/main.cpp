@@ -39,6 +39,10 @@
 #define AKTIFKAN_SENSOR_PINTU true
 #endif
 
+#ifndef SENSOR_PINTU_TERPASANG
+#define SENSOR_PINTU_TERPASANG false
+#endif
+
 #ifndef DURASI_BUKA_MS
 #define DURASI_BUKA_MS 10000
 #endif
@@ -105,6 +109,9 @@ enum StatusSiklusPintu
 };
 
 StatusSiklusPintu statusSiklusPintu = LOCKER_TERKUNCI;
+
+// True hanya setelah akses sah membuka solenoid; mencegah alarm pintu palsu.
+bool aksesPintuTerotorisasi = false;
 
 unsigned long waktuMulaiSiklus = 0;
 unsigned long waktuMulaiMenungguTutup = 0;
@@ -418,10 +425,22 @@ bool muatCacheMapping(const String &batchId)
         baru[i].statusAktif =
             ambilBoolean(fields, "statusAktif", false);
 
+        // Batch hanya valid jika setiap mapping aktif dan sesuai locker/batch.
+        if (!baru[i].statusAktif ||
+            baru[i].idLocker != String(ID_LOCKER) ||
+            baru[i].idFingerprint != labelFingerprint[i] ||
+            baru[i].idSantri.length() == 0 ||
+            baru[i].idSensor <= 0)
+        {
+            Serial.println("[CACHE] Mapping tidak aktif/tidak valid. Cache dibatalkan.");
+            kosongkanCache();
+            return false;
+        }
+
         jumlah++;
     }
 
-    if (jumlah < 5)
+    if (jumlah != 5)
     {
         Serial.print("[CACHE] Gagal memuat mapping (");
         Serial.print(jumlah);
@@ -536,110 +555,308 @@ bool simpanMappingBatch(
 
     Document<Values::Value> dokumen;
 
-    dokumen.add("idFingerprint",
-                Values::Value(Values::StringValue(idFingerprint)));
+    dokumen.add(
+        "idFingerprint",
+        Values::Value(Values::StringValue(idFingerprint)));
 
-    dokumen.add("idSensor",
-                Values::Value(Values::IntegerValue(idSensor)));
+    dokumen.add(
+        "idSensor",
+        Values::Value(Values::IntegerValue(idSensor)));
 
-    dokumen.add("idSantri",
-                Values::Value(Values::StringValue(idSantri)));
+    dokumen.add(
+        "idSantri",
+        Values::Value(Values::StringValue(idSantri)));
 
-    dokumen.add("namaSantri",
-                Values::Value(Values::StringValue(namaSantri)));
+    dokumen.add(
+        "namaSantri",
+        Values::Value(Values::StringValue(namaSantri)));
 
-    dokumen.add("idLocker",
-                Values::Value(Values::StringValue(ID_LOCKER)));
+    dokumen.add(
+        "idLocker",
+        Values::Value(Values::StringValue(ID_LOCKER)));
 
-    dokumen.add("idPerangkat",
-                Values::Value(Values::StringValue(ID_PERANGKAT)));
+    dokumen.add(
+        "idPerangkat",
+        Values::Value(Values::StringValue(ID_PERANGKAT)));
 
-    dokumen.add("jari",
-                Values::Value(Values::StringValue(namaJariSekarang)));
+    dokumen.add(
+        "jari",
+        Values::Value(Values::StringValue(namaJariSekarang)));
 
-    dokumen.add("urutanJari",
-                Values::Value(Values::IntegerValue(urutanJari)));
+    dokumen.add(
+        "urutanJari",
+        Values::Value(Values::IntegerValue(urutanJari)));
 
-    dokumen.add("batchId",
-                Values::Value(Values::StringValue(batchId)));
+    dokumen.add(
+        "batchId",
+        Values::Value(Values::StringValue(batchId)));
 
-    dokumen.add("statusAktif",
-                Values::Value(Values::BooleanValue(true)));
+    dokumen.add(
+        "statusAktif",
+        Values::Value(Values::BooleanValue(true)));
 
     String waktu = dapatkanWaktuUTC();
 
     if (waktu.length() > 0)
     {
-        dokumen.add("createdAt",
-                    Values::Value(Values::TimestampValue(waktu)));
+        dokumen.add(
+            "createdAt",
+            Values::Value(Values::TimestampValue(waktu)));
     }
 
-    // Mode sinkron: createDocument menunggu respons Firestore sampai selesai.
-    // Jangan menunggu 5 detik setelahnya; itu justru selalu membuat timeout palsu.
-    String response = Docs.createDocument(
+    Docs.createDocument(
         aClient,
         Firestore::Parent(FIREBASE_PROJECT_ID),
         documentPath,
         DocumentMask(),
         dokumen);
 
-    if (aClient.lastError().code() != 0)
-    {
-        Serial.printf(
-            "[FIRESTORE][CREATE GAGAL] path=%s | code=%d | %s\\n",
-            documentPath.c_str(),
-            aClient.lastError().code(),
-            aClient.lastError().message().c_str());
-        Serial.print("[FIRESTORE] Response: ");
-        Serial.println(response);
-        return false;
-    }
-
-    Serial.print("[FIRESTORE] Mapping tersimpan: ");
-    Serial.println(documentPath);
-    return true;
+    return aClient.lastError().code() == 0;
 }
 
 // ======================================================
-// NONAKTIFKAN MAPPING
+// HAPUS DOKUMEN FIRESTORE (BENAR-BENAR DIHAPUS)
 // ======================================================
+//
+// Method FirebaseClient untuk menghapus dokumen adalah Docs.deleteDoc()
+// (bukan deleteDocument). Menghapus dokumen yang sudah tidak ada tetap
+// dianggap sukses oleh Firestore, jadi aman dipanggil ulang saat retry.
+// Pastikan Firestore Rules mengizinkan "delete" pada fingerprint-mapping
+// untuk akun USER_EMAIL milik ESP32.
 
-void nonaktifkanMappingBatch(
-    const String &batchId,
-    int jumlahDibuat)
+bool hapusDokumenFirestore(const String &documentPath)
 {
-    for (int i = 0; i < jumlahDibuat && i < 5; i++)
+    for (int percobaan = 0; percobaan < 3; percobaan++)
     {
-        String mappingPath =
-            "fingerprint-mapping/" +
-            String(ID_LOCKER) + "_" +
-            batchId + "_" +
-            labelFingerprint[i];
-
-        Document<Values::Value> patchMap;
-
-        patchMap.add(
-            "statusAktif",
-            Values::Value(Values::BooleanValue(false)));
-
-        PatchDocumentOptions optMap(
-            DocumentMask("statusAktif"),
-            DocumentMask(),
+        Docs.deleteDoc(
+            aClient,
+            Firestore::Parent(FIREBASE_PROJECT_ID),
+            documentPath,
             Precondition());
 
+        int kode = aClient.lastError().code();
+
+        if (kode == 0)
+            return true;
+
+        Serial.printf("[FIRESTORE][ERROR] DELETE %s | code=%d | %s\n",
+                      documentPath.c_str(),
+                      kode,
+                      aClient.lastError().message().c_str());
+
+        layaniFirebase();
+        delay(300);
+    }
+
+    return false;
+}
+
+// ======================================================
+// HAPUS MAPPING SATU BATCH
+// ======================================================
+// Menghapus kelima dokumen fingerprint-mapping milik satu batch.
+
+bool hapusMappingBatch(const String &batchId)
+{
+    if (batchId.length() == 0)
+        return true;
+
+    bool semuaBerhasil = true;
+
+    for (int i = 0; i < 5; i++)
+    {
+        String mappingPath =
+            "fingerprint-mapping/" + String(ID_LOCKER) + "_" +
+            batchId + "_" + labelFingerprint[i];
+
+        if (hapusDokumenFirestore(mappingPath))
+        {
+            Serial.print("[HAPUS] Mapping dihapus: ");
+            Serial.println(mappingPath);
+        }
+        else
+        {
+            semuaBerhasil = false;
+
+            Serial.print("[HAPUS][ERROR] Gagal menghapus: ");
+            Serial.println(mappingPath);
+        }
+    }
+
+    return semuaBerhasil;
+}
+
+// ======================================================
+// KOSONGKAN CONFIG PEMILIK
+// ======================================================
+
+bool kosongkanConfigPemilik(const String &configPath)
+{
+    Document<Values::Value> dokumen;
+
+    dokumen.add(
+        "activeBatchId",
+        Values::Value(Values::StringValue("")));
+
+    dokumen.add(
+        "activeSantriId",
+        Values::Value(Values::StringValue("")));
+
+    dokumen.add(
+        "resetCommand",
+        Values::Value(Values::StringValue("IDLE")));
+
+    String waktu = dapatkanWaktuUTC();
+
+    if (waktu.length() > 0)
+    {
+        dokumen.add(
+            "updatedAt",
+            Values::Value(Values::TimestampValue(waktu)));
+    }
+
+    PatchDocumentOptions patchOptions(
+        DocumentMask(
+            "activeBatchId,activeSantriId,resetCommand,updatedAt"),
+        DocumentMask(),
+        Precondition());
+
+    for (int percobaan = 0; percobaan < 3; percobaan++)
+    {
         Docs.patch(
             aClient,
             Firestore::Parent(FIREBASE_PROJECT_ID),
-            mappingPath,
-            optMap,
-            patchMap);
+            configPath,
+            patchOptions,
+            dokumen);
 
-        if (aClient.lastError().code() != 0)
+        if (aClient.lastError().code() == 0)
+            return true;
+
+        layaniFirebase();
+        delay(300);
+    }
+
+    return false;
+}
+
+// ======================================================
+// HAPUS PEMILIK LAMA (RESET / GANTI PEMILIK)
+// ======================================================
+//
+// Urutan sengaja dibuat "akses dicabut dulu":
+//   1. Cache RAM dikosongkan  -> jari lama langsung ditolak.
+//   2. Seluruh template di sensor dihapus.
+//   3. Dokumen fingerprint-mapping milik batch lama DIHAPUS dari Firestore.
+//   4. locker-config dikosongkan (activeBatchId/activeSantriId).
+//
+// Jika langkah 2-4 gagal, fungsi mengembalikan false dan akses lama tetap
+// sudah tercabut. Pemanggil boleh mencoba lagi (semua langkah idempoten).
+//
+// batchDiketahui : activeBatchId yang sudah dibaca pemanggil (boleh kosong,
+//                  maka dibaca ulang dari locker-config).
+// adaPemilikLama : (opsional) diisi true jika ada batch lama yang dihapus.
+
+bool hapusPemilikLama(
+    const String &configPath,
+    const String &batchDiketahui,
+    bool *adaPemilikLama = nullptr)
+{
+    if (adaPemilikLama != nullptr)
+        *adaPemilikLama = false;
+
+    // Kumpulkan semua batch yang harus dihapus (maks. 2 kandidat berbeda).
+    String batchHapus[2];
+    int jumlahBatch = 0;
+
+    auto tambahBatch = [&](const String &b)
+    {
+        if (b.length() == 0)
+            return;
+
+        for (int i = 0; i < jumlahBatch; i++)
         {
-            Serial.print("[MAPPING] Gagal menonaktifkan ");
-            Serial.println(labelFingerprint[i]);
+            if (batchHapus[i] == b)
+                return;
+        }
+
+        if (jumlahBatch < 2)
+            batchHapus[jumlahBatch++] = b;
+    };
+
+    tambahBatch(batchDiketahui);
+    tambahBatch(cacheBatchId); // harus diambil SEBELUM cache dikosongkan
+
+    // Jika pemanggil belum tahu batch aktif, baca dari locker-config.
+    if (batchDiketahui.length() == 0)
+    {
+        for (int percobaan = 0; percobaan < 2; percobaan++)
+        {
+            String hasilConfig;
+
+            if (bacaDokumen(configPath, hasilConfig))
+            {
+                JsonDocument docConfig;
+
+                if (!deserializeJson(docConfig, hasilConfig))
+                {
+                    JsonObject fieldsConfig = docConfig["fields"];
+
+                    if (!fieldsConfig.isNull())
+                        tambahBatch(ambilString(fieldsConfig, "activeBatchId"));
+                }
+
+                break;
+            }
+
+            layaniFirebase();
+            delay(300);
         }
     }
+
+    if (adaPemilikLama != nullptr)
+        *adaPemilikLama = (jumlahBatch > 0);
+
+    // 1. Cabut akses: jari lama langsung ditolak.
+    kosongkanCache();
+
+    // 2. Hapus seluruh template di sensor.
+    if (!hapusSemuaFingerprint())
+    {
+        Serial.println(
+            "[HAPUS PEMILIK] Gagal mengosongkan sensor.");
+
+        return false;
+    }
+
+    // 3. Hapus mapping lama dari Firestore.
+    for (int i = 0; i < jumlahBatch; i++)
+    {
+        Serial.print("[HAPUS PEMILIK] Menghapus mapping batch ");
+        Serial.println(batchHapus[i]);
+
+        if (!hapusMappingBatch(batchHapus[i]))
+        {
+            Serial.println(
+                "[HAPUS PEMILIK] Sebagian mapping gagal dihapus.");
+
+            return false;
+        }
+    }
+
+    // 4. Kosongkan locker-config.
+    if (!kosongkanConfigPemilik(configPath))
+    {
+        Serial.println(
+            "[HAPUS PEMILIK] Gagal mengosongkan locker-config.");
+
+        return false;
+    }
+
+    Serial.println(
+        "[HAPUS PEMILIK] Data pemilik lama bersih (sensor + Firestore).");
+
+    return true;
 }
 
 // ======================================================
@@ -759,27 +976,12 @@ bool simpanRiwayatAkses(
             Values::Value(Values::TimestampValue(waktu)));
     }
 
-    String response = Docs.createDocument(
+    Docs.createDocument(
         aClient,
         Firestore::Parent(FIREBASE_PROJECT_ID),
         documentPath,
         DocumentMask(),
         dokumen);
-
-    if (aClient.lastError().code() != 0)
-    {
-        Serial.print("[FIRESTORE] Create gagal: ");
-        Serial.println(aClient.lastError().message());
-        Serial.print("[FIRESTORE] Code: ");
-        Serial.println(aClient.lastError().code());
-        Serial.println(response);
-        return false;
-    }
-
-    Serial.print("[FIRESTORE] Mapping tersimpan: ");
-    Serial.println(documentPath);
-
-    return true;
 
     return aClient.lastError().code() == 0;
 }
@@ -837,6 +1039,7 @@ void pulihkanStandby(const String &alasan)
 {
     relayOff();
 
+    aksesPintuTerotorisasi = false;
     statusSiklusPintu = LOCKER_TERKUNCI;
 
     Serial.print("[SOLENOID] ");
@@ -875,11 +1078,13 @@ bool mulaiSiklusBukaLocker(const String &sumber)
         return false;
     }
 
-    relayOn();
-
-    waktuMulaiSiklus = millis();
-
+    // Tandai izin sebelum relay aktif agar pembacaan sensor berikutnya
+    // tidak salah dianggap sebagai pembukaan paksa.
+    aksesPintuTerotorisasi = true;
     statusSiklusPintu = MENUNGGU_PINTU_DIBUKA;
+
+    relayOn();
+    waktuMulaiSiklus = millis();
 
     Serial.print("[BUKA] Solenoid dibuka melalui: ");
     Serial.println(sumber);
@@ -951,44 +1156,26 @@ void periksaSensorPintu()
         return;
 
     int nilaiMentah = digitalRead(SENSOR_PINTU_PIN);
+    bool tertutupMentah = (nilaiMentah == PINTU_TERTUTUP_LEVEL);
 
-    // Debug hanya mencetak saat nilai sensor berubah (tidak spam tiap detik).
-    if (DEBUG_SENSOR_PINTU)
-    {
-        static int nilaiDebugTerakhir = -1;
-        if (nilaiMentah != nilaiDebugTerakhir)
-        {
-            nilaiDebugTerakhir = nilaiMentah;
-            Serial.printf("[DBG][PINTU] raw=%d\n", nilaiMentah);
-        }
-    }
-
-    bool tertutupMentah =
-        (nilaiMentah == PINTU_TERTUTUP_LEVEL);
-
+    // Inisialisasi pembacaan pertama agar tidak langsung memicu alarm.
     if (!pintuInisialisasi)
     {
         pintuInisialisasi = true;
-
         pintuTertutup = tertutupMentah;
         pembacaanTerakhir = tertutupMentah;
-
         waktuPerubahanPembacaan = millis();
-
         statusPintuPerluDikirim = KIRIM_STATUS_PINTU;
 
         Serial.print("[PINTU] Status awal: ");
-
-        Serial.println(
-            pintuTertutup ? "TERTUTUP" : "TERBUKA");
-
+        Serial.println(pintuTertutup ? "TERTUTUP" : "TERBUKA");
         return;
     }
 
+    // Debounce perubahan sensor.
     if (tertutupMentah != pembacaanTerakhir)
     {
         pembacaanTerakhir = tertutupMentah;
-
         waktuPerubahanPembacaan = millis();
     }
 
@@ -996,35 +1183,41 @@ void periksaSensorPintu()
         millis() - waktuPerubahanPembacaan >= DEBOUNCE_PINTU_MS)
     {
         pintuTertutup = pembacaanTerakhir;
-
         statusPintuPerluDikirim = KIRIM_STATUS_PINTU;
 
         if (!pintuTertutup)
         {
             Serial.println("[DOOR] OPEN.");
 
-            if (statusSiklusPintu == MENUNGGU_PINTU_DIBUKA)
+            // Pembukaan yang terjadi setelah akses sah bukan alarm.
+            if (statusSiklusPintu == MENUNGGU_PINTU_DIBUKA &&
+                aksesPintuTerotorisasi)
             {
-                statusSiklusPintu =
-                    MENUNGGU_PINTU_DITUTUP;
-
+                statusSiklusPintu = MENUNGGU_PINTU_DITUTUP;
                 waktuMulaiMenungguTutup = millis();
-
-                Serial.println(
-                    "[PINTU] Menunggu pintu ditutup.");
+                Serial.println("[PINTU] Pembukaan terotorisasi. Menunggu pintu ditutup.");
             }
             else if (statusSiklusPintu == LOCKER_TERKUNCI)
             {
-
-                if (firebaseReady)
+                // Sensor belum terpasang/terkalibrasi: jangan membuat alarm palsu.
+                if (!SENSOR_PINTU_TERPASANG)
                 {
-                    simpanRiwayatAkses(
-                        0,
-                        "PINTU",
-                        "-",
-                        "-",
-                        "PERINGATAN",
-                        "Pintu terbuka saat locker terkunci (tanpa autentikasi).");
+                    Serial.println("[INFO] Sensor pintu belum dipasang/diaktifkan untuk alarm. Event diabaikan.");
+                }
+                else
+                {
+                    Serial.println("[BAHAYA] Pintu terbuka saat locker terkunci tanpa akses sah!");
+
+                    if (firebaseReady)
+                    {
+                        simpanRiwayatAkses(
+                            0,
+                            "PINTU",
+                            "-",
+                            "-",
+                            "BAHAYA",
+                            "Pintu terbuka saat locker terkunci tanpa autentikasi.");
+                    }
                 }
             }
         }
@@ -1034,12 +1227,12 @@ void periksaSensorPintu()
 
             if (statusSiklusPintu == MENUNGGU_PINTU_DITUTUP)
             {
-                pulihkanStandby(
-                    "Pintu ditutup | Solenoid terkunci.");
+                pulihkanStandby("Pintu ditutup | Solenoid terkunci.");
             }
         }
     }
 
+    // Kirim status pintu ke Firestore secara berkala setelah perubahan.
     if (statusPintuPerluDikirim &&
         firebaseReady &&
         millis() - waktuKirimStatusPintu >= 5000)
@@ -1047,13 +1240,10 @@ void periksaSensorPintu()
         waktuKirimStatusPintu = millis();
 
         if (kirimStatusPintu(pintuTertutup))
-        {
             statusPintuPerluDikirim = false;
-        }
     }
 }
 
-// ======================================================
 // ROLLBACK SENSOR
 // ======================================================
 
@@ -1070,6 +1260,43 @@ void rollbackSensor(int ids[], int jumlah)
 
             ids[i] = -1;
         }
+    }
+}
+
+// ======================================================
+// MASUK MODE STANDBY AUTENTIKASI
+// ======================================================
+//
+// Dipanggil sebagai langkah terakhir setelah enrollment berhasil.
+// Memastikan jari terakhir sudah diangkat, menutup mode enrollment,
+// lalu mengatur ulang timer agar iterasi loop berikutnya langsung
+// menjalankan autentikasi (tanpa GET Firestore yang memblokir dulu).
+
+void masukModeStandbyAutentikasi()
+{
+    // Jari kelingking yang baru didaftarkan jangan sampai langsung
+    // terbaca sebagai percobaan akses pertama.
+    for (int i = 0; i < 2; i++)
+    {
+        if (tungguJariDiangkat())
+            break;
+    }
+
+    prosesEnrollmentAktif = false;
+
+    waktuCekEnrollment = millis();
+    waktuCekLocker = millis();
+    waktuCobaCache = 0;
+
+    Serial.println();
+    Serial.println("[STANDBY] Enrollment selesai.");
+    Serial.println("[STANDBY] Mode autentikasi fingerprint AKTIF. Tempelkan jari untuk membuka locker.");
+
+    if (!lockerSiapDibuka())
+    {
+        Serial.println(
+            "[STANDBY] Catatan: locker belum siap dibuka "
+            "(siklus pintu berjalan / sensor pintu belum terbaca TERTUTUP).");
     }
 }
 
@@ -1150,6 +1377,44 @@ void cekPerintahEnrollment()
         return;
     }
 
+    // ----------------------------------------------
+    // HAPUS PEMILIK LAMA (GANTI PEMILIK)
+    // ----------------------------------------------
+    // Sensor dikosongkan dan mapping lama DIHAPUS dari Firestore,
+    // sehingga enrollment baru tidak menumpuk di atas data lama.
+
+    String configPath =
+        "locker-config/" + String(ID_LOCKER);
+
+    bool adaPemilikLama = false;
+
+    Serial.println(
+        "[ENROLLMENT] Membersihkan data pemilik lama...");
+
+    if (!hapusPemilikLama(configPath, "", &adaPemilikLama))
+    {
+        updateStatusEnrollmentCommand(
+            "failed",
+            "Gagal menghapus data pemilik lama (sensor/Firestore).");
+
+        prosesEnrollmentAktif = false;
+
+        Serial.println("=== ENROLLMENT DIBATALKAN ===");
+
+        return;
+    }
+
+    if (adaPemilikLama)
+    {
+        simpanRiwayatAkses(
+            0,
+            "GANTI_PEMILIK",
+            "-",
+            "Admin / Pembina",
+            "DISETUJUI",
+            "Pemilik lama dihapus karena enrollment pemilik baru.");
+    }
+
     int idsSensor[5] = {
         -1, -1, -1, -1, -1};
 
@@ -1171,18 +1436,7 @@ void cekPerintahEnrollment()
         Serial.print("/5: ");
         Serial.println(namaJari[i]);
 
-        int idSensor;
-
-        if (String(ID_LOCKER) == "L02")
-        {
-            Serial.print("[DEBUG] Status slot 6: ");
-            Serial.println(statusSlot(6));
-            idSensor = cariIdKosong(6);
-        }
-        else
-        {
-            idSensor = cariIdKosong();
-        }
+        int idSensor = cariIdKosong();
 
         if (idSensor <= 0)
         {
@@ -1264,8 +1518,6 @@ void cekPerintahEnrollment()
     Serial.println(
         "[ENROLLMENT] Menyimpan mapping ke Firestore...");
 
-    int mappingDibuat = 0;
-
     for (int i = 0; i < 5; i++)
     {
         bool mappingBerhasil = simpanMappingBatch(
@@ -1289,17 +1541,13 @@ void cekPerintahEnrollment()
             break;
         }
 
-        mappingDibuat++;
-
         Serial.print("[ENROLLMENT] Mapping berhasil: ");
         Serial.println(labelFingerprint[i]);
     }
 
     if (!semuaBerhasil)
     {
-        nonaktifkanMappingBatch(
-            batchId,
-            mappingDibuat);
+        hapusMappingBatch(batchId);
 
         rollbackSensor(idsSensor, 5);
 
@@ -1323,7 +1571,7 @@ void cekPerintahEnrollment()
         Serial.println(
             "[ENROLLMENT] Gagal mengaktifkan batch.");
 
-        nonaktifkanMappingBatch(batchId, 5);
+        hapusMappingBatch(batchId);
 
         rollbackSensor(idsSensor, 5);
 
@@ -1382,7 +1630,8 @@ void cekPerintahEnrollment()
         Serial.println(idsSensor[i]);
     }
 
-    prosesEnrollmentAktif = false;
+    // Langsung masuk mode autentikasi standby.
+    masukModeStandbyAutentikasi();
 }
 
 // ======================================================
@@ -1451,61 +1700,14 @@ void prosesResetLocker(
     Serial.println(
         "\n[RESET LOCKER] Perintah reset diterima.");
 
-    if (!hapusSemuaFingerprint())
+    // Sensor dikosongkan, mapping lama DIHAPUS dari Firestore, dan
+    // locker-config dikosongkan (resetCommand kembali IDLE).
+    // Jika ada langkah yang gagal, resetCommand tetap RESET_OWNER
+    // sehingga perintah otomatis dicoba lagi pada polling berikutnya.
+    if (!hapusPemilikLama(configPath, activeBatchId))
     {
         Serial.println(
-            "[RESET LOCKER] Gagal menghapus sensor. Firestore tidak diubah.");
-
-        return;
-    }
-
-    kosongkanCache();
-
-    if (activeBatchId.length() > 0)
-    {
-        nonaktifkanMappingBatch(activeBatchId, 5);
-    }
-
-    Document<Values::Value> dokumen;
-
-    dokumen.add(
-        "activeBatchId",
-        Values::Value(Values::StringValue("")));
-
-    dokumen.add(
-        "activeSantriId",
-        Values::Value(Values::StringValue("")));
-
-    dokumen.add(
-        "resetCommand",
-        Values::Value(Values::StringValue("IDLE")));
-
-    String waktu = dapatkanWaktuUTC();
-
-    if (waktu.length() > 0)
-    {
-        dokumen.add(
-            "updatedAt",
-            Values::Value(Values::TimestampValue(waktu)));
-    }
-
-    PatchDocumentOptions patchOptions(
-        DocumentMask(
-            "activeBatchId,activeSantriId,resetCommand,updatedAt"),
-        DocumentMask(),
-        Precondition());
-
-    Docs.patch(
-        aClient,
-        Firestore::Parent(FIREBASE_PROJECT_ID),
-        configPath,
-        patchOptions,
-        dokumen);
-
-    if (aClient.lastError().code() != 0)
-    {
-        Serial.println(
-            "[RESET LOCKER] Gagal memperbarui locker-config.");
+            "[RESET LOCKER] Reset belum tuntas. Akan dicoba lagi.");
 
         return;
     }
@@ -1519,7 +1721,7 @@ void prosesResetLocker(
         "Loker di-reset untuk penggantian pemilik baru.");
 
     Serial.println(
-        "[RESET LOCKER] Loker berhasil di-reset.");
+        "[RESET LOCKER] Loker berhasil di-reset. Sensor dan Firestore bersih.");
 }
 
 // ======================================================
@@ -1653,7 +1855,22 @@ void prosesAutentikasiOtomatis()
         return;
 
     if (!lockerSiapDibuka())
+    {
+        // Beri tahu mengapa autentikasi belum aktif (maks. tiap 10 detik).
+        static unsigned long waktuLogTunggu = 0;
+
+        if (millis() - waktuLogTunggu >= 10000)
+        {
+            waktuLogTunggu = millis();
+
+            if (statusSiklusPintu != LOCKER_TERKUNCI)
+                Serial.println("[STANDBY] Menunggu siklus pintu selesai.");
+            else
+                Serial.println("[STANDBY] Menunggu sensor pintu membaca TERTUTUP.");
+        }
+
         return;
+    }
 
     int idSensor = cariFingerprint();
 
@@ -1813,16 +2030,41 @@ void mulaiFirebase()
 void setup()
 {
     Serial.begin(115200);
+
+    // WAJIB: label mapping FP01-FP05 (L01), FP06-FP10 (L02)
+    inisialisasiLabelFingerprint();
+
     delay(1000);
 
-    Serial.println("DEBUG: SETUP MULAI");
+    relayOff();
 
-    // WAJIB: siapkan label FP06-FP10 untuk L02 sebelum cache/enrollment.
-    inisialisasiLabelFingerprint();
-    Serial.printf("[FP] Label mapping: %s, %s, %s, %s, %s\\n",
-                  labelFingerprint[0].c_str(), labelFingerprint[1].c_str(),
-                  labelFingerprint[2].c_str(), labelFingerprint[3].c_str(),
-                  labelFingerprint[4].c_str());
+    pinMode(
+        SENSOR_PINTU_PIN,
+        INPUT_PULLUP);
+
+    delay(50);
+
+    periksaSensorPintu();
+
+    Serial.println();
+    Serial.println("+--------------------------------------+");
+    Serial.printf("| SMART LOCKER | %-18s | %-3s |\n",
+                  ID_PERANGKAT, ID_LOCKER);
+    Serial.println("+--------------------------------------+");
+
+    // WIFI
+    if (hubungkanWiFi())
+    {
+        mulaiFirebase();
+    }
+    else
+    {
+        Serial.println(
+            "[FIREBASE] Ditunda sampai WiFi tersambung.");
+    }
+
+    // HOOK FINGERPRINT
+    setHookTunggu(layaniFirebase);
 
     // FINGERPRINT
     Serial.println(
